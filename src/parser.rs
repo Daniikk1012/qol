@@ -114,6 +114,7 @@ impl Parser {
         names.insert("кем".to_string(), NameType::Function(2));
         names.insert("қалдық".to_string(), NameType::Function(2));
         names.insert("тең".to_string(), NameType::Function(2));
+        names.insert("ал".to_string(), NameType::Procedure);
         names.insert("жаз".to_string(), NameType::Procedure);
         names.insert("қос".to_string(), NameType::Procedure);
         names.insert("оқы".to_string(), NameType::Procedure);

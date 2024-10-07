@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gccjit = "2.1"
+gccjit = { version = "2.1", features = ["master"] }

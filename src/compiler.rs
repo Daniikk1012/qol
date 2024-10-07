@@ -1,3 +1,10 @@
+// TODO Remove use of newer features of libgccjit (Apparently, the library is VERY young), like:
+// new_sizeof -> pointer arithmetic like (char *)&((T *)0)[1] - (char *)(T *)0;
+// is_struct -> remove completely, as without get_field it's useless
+// new_struct_constructor -> manually zero-initialize all fields;
+// get_field -> store the fields alongside with the types themselves.
+// TODO Move to cranelift for codegen, as that will remove the dynamic library dependency
+
 use std::{
     collections::HashMap,
     fmt::Write,
@@ -107,8 +114,8 @@ enum GenericType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BoundType {
-    Noun(ConcreteType),
+enum BoundType<'a> {
+    Noun(ConcreteType, LValue<'a>),
     Function(Vec<GenericType>, GenericType),
 }
 
@@ -116,11 +123,10 @@ enum BoundType {
 struct Compiler<'a, 'ctx> {
     context: &'a Context<'ctx>,
     block: Option<Block<'a>>,
-    types: Vec<HashMap<String, Vec<BoundType>>>,
-    variables: Vec<HashMap<String, LValue<'a>>>,
+    types: Vec<HashMap<String, Vec<BoundType<'a>>>>,
     gccjit_types: HashMap<ConcreteType, Type<'a>>,
     functions: HashMap<String, Function<'a>>,
-    loop_ends: Vec<Block<'a>>,
+    loop_ends: Vec<(Block<'a>, usize)>,
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
@@ -132,7 +138,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             ExpressionType::Character(_) => ConcreteType::Character,
             ExpressionType::String(_) => ConcreteType::Array(Box::new(ConcreteType::Character)),
             ExpressionType::Noun(name) => {
-                if let Some(BoundType::Noun(ty)) = self
+                if let Some(BoundType::Noun(ty, _)) = self
                     .types
                     .iter()
                     .rev()
@@ -268,7 +274,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 }
             }
             ExpressionType::Field(x, field) => match (self.get_type(x), field.name.as_str()) {
-                (ConcreteType::Array(_), "саны") => ConcreteType::Natural,
+                (ConcreteType::Array(_), "Саны") => ConcreteType::Natural,
                 (ref ty @ ConcreteType::Struct(ref fields), _) => fields
                     .iter()
                     .find_map(|(field_type, name)| {
@@ -366,7 +372,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     }
 
     fn get_gccjit_type(&mut self, ty: &ConcreteType) -> Type<'a> {
-        if !self.gccjit_types.contains_key(&ty) {
+        if !self.gccjit_types.contains_key(ty) {
             let gccjit_type = match &ty {
                 ConcreteType::Boolean => self.context.new_type::<bool>(),
                 ConcreteType::Natural => self.context.new_type::<u64>(),
@@ -399,7 +405,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             .map(|(index, (field_type, _))| {
                                 self.context.new_field(
                                     None,
-                                    self.get_gccjit_type(field_type.as_ref().unwrap_or(&ty)),
+                                    self.get_gccjit_type(field_type.as_ref().unwrap_or(ty)),
                                     format!("t{index}"),
                                 )
                             })
@@ -410,7 +416,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             };
             self.gccjit_types.insert(ty.clone(), gccjit_type);
         }
-        self.gccjit_types[&ty]
+        self.gccjit_types[ty]
     }
 
     fn get_concrete(&self, ty: &parser::Type) -> ConcreteType {
@@ -427,18 +433,113 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
     fn push_scope(&mut self) {
         self.types.push(HashMap::new());
-        self.variables.push(HashMap::new());
+    }
+
+    fn compile_free(&mut self, ty: &ConcreteType, lvalue_variable: LValue<'a>) {
+        let block = self
+            .block
+            .expect("freeing must happen within a non-terminated block");
+        if let ConcreteType::Array(element_type) = &ty {
+            let struct_array = self
+                .get_gccjit_type(ty)
+                .is_struct()
+                .expect("arrays should always be represented as structures");
+            let rvalue_values = lvalue_variable
+                .access_field(None, struct_array.get_field(0))
+                .to_rvalue();
+            let ty_usize = self.context.new_type::<usize>();
+            let lvalue_count = block.get_function().new_local(None, ty_usize, "count");
+            block.add_assignment(
+                None,
+                lvalue_count,
+                lvalue_variable
+                    .access_field(None, struct_array.get_field(1))
+                    .to_rvalue(),
+            );
+            let rvalue_one = self.context.new_rvalue_one(ty_usize);
+            let block_condition = block.get_function().new_block("array free condition");
+            let block_start = block.get_function().new_block("array free start");
+            let block_end = block.get_function().new_block("array free end");
+            block.end_with_jump(None, block_condition);
+            block_condition.end_with_conditional(
+                None,
+                self.context.new_comparison(
+                    None,
+                    ComparisonOp::GreaterThan,
+                    lvalue_count,
+                    self.context.new_rvalue_zero(ty_usize),
+                ),
+                block_start,
+                block_end,
+            );
+            self.block = Some(block_start);
+            self.compile_free(
+                element_type,
+                self.context.new_array_access(
+                    None,
+                    rvalue_values,
+                    self.context.new_binary_op(
+                        None,
+                        BinaryOp::Minus,
+                        ty_usize,
+                        lvalue_count,
+                        rvalue_one,
+                    ),
+                ),
+            );
+            let block = self.block.expect("freeing should not terminate scope");
+            block.add_assignment_op(None, lvalue_count, BinaryOp::Minus, rvalue_one);
+            block.end_with_jump(None, block_condition);
+            block_end.add_eval(
+                None,
+                self.context.new_call(
+                    None,
+                    self.functions["free"],
+                    &[self.context.new_cast(
+                        None,
+                        rvalue_values,
+                        self.context.new_type::<()>().make_pointer(),
+                    )],
+                ),
+            );
+            self.block = Some(block_end);
+        }
+    }
+
+    fn free_scope(&mut self, index: usize) {
+        if self.block.is_none() {
+            return;
+        }
+        let types = self
+            .types
+            .get_mut(index)
+            .expect("scope does not have enough levels")
+            .clone();
+        for vec in types.into_values() {
+            for (ty, variable) in vec.into_iter().rev().filter_map(|ty| {
+                if let BoundType::Noun(ty, lvalue) = ty {
+                    Some((ty, lvalue))
+                } else {
+                    None
+                }
+            }) {
+                self.compile_free(&ty, variable);
+            }
+        }
     }
 
     fn pop_scope(&mut self) {
+        self.free_scope(self.types.len() - 1);
         self.types.pop().expect("scope is empty");
-        self.variables.pop().expect("scope is empty");
     }
 
-    fn compile_lvalue(&self, expr: &Expression) -> LValue<'a> {
+    fn compile_lvalue(&mut self, expr: &Expression) -> LValue<'a> {
+        let loc =
+            self.context
+                .new_location(TMP_FILENAME, expr.line as i32 + 1, expr.column as i32 + 1);
         match &expr.expression_type {
             ExpressionType::Noun(name) => *self
-                .variables
+                .types
                 .iter()
                 .rev()
                 .find_map(|map| map.get(name))
@@ -448,7 +549,93 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         expr.line + 1,
                         expr.column + 1
                     )
-                }),
+                })
+                .iter()
+                .rev()
+                .find_map(|ty| {
+                    if let BoundType::Noun(_, lvalue) = ty {
+                        Some(lvalue)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| panic!("{name} is not a variable")),
+            ExpressionType::BinaryOperation(array, BinaryOperator::Index, index) => {
+                let struct_array = self
+                    .get_gccjit_type(&self.get_type(array))
+                    .is_struct()
+                    .expect("arrays must be represented as structs");
+                let ty_usize = self.context.new_type::<usize>();
+                let lvalue_array = self.compile_lvalue(array);
+                let block = self
+                    .block
+                    .expect("compiling lvalue should not terminate a block");
+                let lvalue_index =
+                    block
+                        .get_function()
+                        .new_local(Some(loc), ty_usize, "lvalue index");
+                block.add_assignment(Some(loc), lvalue_index, self.compile_expression(index));
+                let block_then = block.get_function().new_block("lvalue out of bounds");
+                let block_else = block.get_function().new_block("lvalue within bounds");
+                block.end_with_conditional(
+                    Some(loc),
+                    self.context.new_comparison(
+                        Some(loc),
+                        ComparisonOp::GreaterThanEquals,
+                        lvalue_index,
+                        lvalue_array.access_field(Some(loc), struct_array.get_field(1)),
+                    ),
+                    block_then,
+                    block_else,
+                );
+                block_then.add_eval(
+                    Some(loc),
+                    self.context.new_call(
+                        Some(loc),
+                        self.functions["printf"],
+                        &[self.context.new_string_literal(format!(
+                            "array access out of bounds at {}:{}",
+                            expr.line + 1,
+                            expr.column + 1
+                        ))],
+                    ),
+                );
+                block_then.add_eval(
+                    Some(loc),
+                    self.context.new_call(
+                        Some(loc),
+                        self.functions["exit"],
+                        &[self
+                            .context
+                            .new_rvalue_one(self.context.new_c_type(CType::Int))],
+                    ),
+                );
+                block_then.end_with_jump(Some(loc), block_else);
+                self.block = Some(block_else);
+                self.context.new_array_access(
+                    Some(loc),
+                    lvalue_array.access_field(Some(loc), struct_array.get_field(0)),
+                    lvalue_index,
+                )
+            }
+            ExpressionType::Field(expr, ident) => {
+                let ty = self.get_type(expr);
+                let lvalue_struct = self.compile_lvalue(expr);
+                lvalue_struct.access_field(
+                    Some(loc),
+                    self.get_gccjit_type(&ty)
+                        .is_struct()
+                        .expect("fields can only be accessed on structs")
+                        .get_field(
+                            if let (ConcreteType::Array(_), "Саны") = (ty, ident.name.as_str())
+                            {
+                                1
+                            } else {
+                                todo!()
+                            },
+                        ),
+                )
+            }
             _ => todo!(),
         }
     }
@@ -465,26 +652,70 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         let loc = self
             .context
             .new_location(TMP_FILENAME, line as i32 + 1, column as i32 + 1);
-        let result_type = self.get_type(expr);
-        let left_value = self.compile_expression(left);
         let right_value = self.compile_expression(right);
-        let result_gccjit_type = self.get_gccjit_type(&result_type);
         if *op == BinaryOperator::Index {
-            // TODO Bound checking
+            let struct_array = self
+                .get_gccjit_type(&self.get_type(left))
+                .is_struct()
+                .expect("arrays should be represented as structs");
+            let lvalue_array = self.compile_lvalue(left);
+            let block = self
+                .block
+                .expect("should always be called with a non-terminated block");
+            let lvalue_index = block.get_function().new_local(
+                Some(loc),
+                self.context.new_type::<usize>(),
+                "index",
+            );
+            block.add_assignment(Some(loc), lvalue_index, right_value);
+            let block_then = block.get_function().new_block("then");
+            let block_else = block.get_function().new_block("else");
+            block.end_with_conditional(
+                Some(loc),
+                self.context.new_comparison(
+                    Some(loc),
+                    ComparisonOp::GreaterThanEquals,
+                    lvalue_index.to_rvalue(),
+                    lvalue_array.access_field(Some(loc), struct_array.get_field(1)),
+                ),
+                block_then,
+                block_else,
+            );
+            block_then.add_eval(
+                Some(loc),
+                self.context.new_call(
+                    Some(loc),
+                    self.functions["printf"],
+                    &[self.context.new_string_literal(format!(
+                        "index out of bounds at {}:{}",
+                        line + 1,
+                        column + 1
+                    ))],
+                ),
+            );
+            block_then.add_eval(
+                Some(loc),
+                self.context.new_call(
+                    Some(loc),
+                    self.functions["exit"],
+                    &[self
+                        .context
+                        .new_rvalue_one(self.context.new_c_type(CType::Int))],
+                ),
+            );
+            block_then.end_with_jump(Some(loc), block_else);
+            self.block = Some(block_else);
             self.context
                 .new_array_access(
                     Some(loc),
-                    left_value.access_field(
-                        None,
-                        self.get_gccjit_type(&self.get_type(left))
-                            .is_struct()
-                            .expect("should only be used with an array")
-                            .get_field(0),
-                    ),
-                    right_value,
+                    lvalue_array.access_field(Some(loc), struct_array.get_field(0)),
+                    lvalue_index.to_rvalue(),
                 )
                 .to_rvalue()
         } else {
+            let result_type = self.get_type(expr);
+            let left_value = self.compile_expression(left);
+            let result_gccjit_type = self.get_gccjit_type(&result_type);
             self.context.new_binary_op(
                 Some(loc),
                 match op {
@@ -623,7 +854,21 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             &ExpressionType::Character(ch) => self
                 .context
                 .new_rvalue_from_long(self.get_gccjit_type(&ConcreteType::Character), ch as i64),
-            ExpressionType::Noun(..) => self.compile_lvalue(expr).to_rvalue(),
+            ExpressionType::Noun(..) | ExpressionType::Field(..) => {
+                let rvalue = self.compile_lvalue(expr).to_rvalue();
+                if let ExpressionType::Field(array_expr, ident) = &expr.expression_type {
+                    if let (ConcreteType::Array(_), "Саны") =
+                        (self.get_type(array_expr), ident.name.as_str())
+                    {
+                        self.context
+                            .new_cast(Some(loc), rvalue, self.context.new_type::<u64>())
+                    } else {
+                        rvalue
+                    }
+                } else {
+                    rvalue
+                }
+            }
             ExpressionType::Negate(value) => self.context.new_unary_op(
                 Some(loc),
                 UnaryOp::Minus,
@@ -652,9 +897,10 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 expr.column + 1
             );
         }
+        let rvalue_condition = self.compile_expression(expr);
         let block = self
             .block
-            .expect("should only be called with a valid block");
+            .expect("block must not terminated after compiling an expression");
         self.push_scope();
         let block_then = block.get_function().new_block("then");
         self.block = Some(block_then);
@@ -676,7 +922,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 self.context
                     .new_location(TMP_FILENAME, line as i32 + 1, column as i32 + 1),
             ),
-            self.compile_expression(expr),
+            rvalue_condition,
             block_then,
             block_else,
         );
@@ -692,6 +938,163 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         } else {
             None
         };
+    }
+
+    fn compile_copy(
+        &mut self,
+        ty: &ConcreteType,
+        lvalue_copy: LValue<'a>,
+        rvalue_initial: RValue<'a>,
+    ) {
+        let block = self
+            .block
+            .expect("should only be called with a valid block");
+        match &ty {
+            ConcreteType::Boolean
+            | ConcreteType::Natural
+            | ConcreteType::Whole
+            | ConcreteType::Real
+            | ConcreteType::Character => block.add_assignment(None, lvalue_copy, rvalue_initial),
+            ConcreteType::Array(element_type) => {
+                let struct_array = self
+                    .get_gccjit_type(ty)
+                    .is_struct()
+                    .expect("arrays must be represented as structs");
+                let field_values = struct_array.get_field(0);
+                let field_count = struct_array.get_field(1);
+                let field_capacity = struct_array.get_field(2);
+                let ty_value = self.get_gccjit_type(element_type);
+                let ty_values = ty_value.make_pointer();
+                let ty_usize = self.context.new_type::<usize>();
+                let lvalue_initial =
+                    block
+                        .get_function()
+                        .new_local(None, struct_array.as_type(), "to_copy");
+                block.add_assignment(None, lvalue_initial, rvalue_initial);
+                let lvalue_values = lvalue_copy.access_field(None, field_values);
+                let lvalue_count = lvalue_copy.access_field(None, field_count);
+                let rvalue_capacity = lvalue_initial
+                    .to_rvalue()
+                    .access_field(None, field_capacity);
+                block.add_assignment(
+                    None,
+                    lvalue_values,
+                    self.context.new_cast(
+                        None,
+                        self.context.new_call(
+                            None,
+                            self.functions["realloc"],
+                            &[
+                                self.context
+                                    .new_null(self.context.new_type::<()>().make_pointer()),
+                                self.context.new_binary_op(
+                                    None,
+                                    BinaryOp::Mult,
+                                    ty_usize,
+                                    rvalue_capacity,
+                                    self.context
+                                        .new_rvalue_from_long(ty_usize, ty_value.get_size() as i64),
+                                ),
+                            ],
+                        ),
+                        ty_values,
+                    ),
+                );
+                let block_error = block.get_function().new_block("error");
+                let block_continue = block.get_function().new_block("continue");
+                block.end_with_conditional(
+                    None,
+                    self.context.new_comparison(
+                        None,
+                        ComparisonOp::Equals,
+                        lvalue_values.to_rvalue(),
+                        self.context.new_null(ty_values),
+                    ),
+                    block_error,
+                    block_continue,
+                );
+                block_error.add_eval(
+                    None,
+                    self.context.new_call(
+                        None,
+                        self.functions["printf"],
+                        &[self
+                            .context
+                            .new_string_literal("couldn't allocate a copy of array\n")],
+                    ),
+                );
+                block_error.add_eval(
+                    None,
+                    self.context.new_call(
+                        None,
+                        self.functions["exit"],
+                        &[self
+                            .context
+                            .new_rvalue_one(self.context.new_c_type(CType::Int))],
+                    ),
+                );
+                block_error.end_with_jump(None, block_continue);
+                block_continue.add_assignment(
+                    None,
+                    lvalue_count,
+                    lvalue_initial.access_field(None, field_count).to_rvalue(),
+                );
+                block_continue.add_assignment(
+                    None,
+                    lvalue_copy.access_field(None, field_capacity),
+                    rvalue_capacity,
+                );
+                let lvalue_index = block_continue
+                    .get_function()
+                    .new_local(None, ty_usize, "index");
+                block_continue.add_assignment(
+                    None,
+                    lvalue_index,
+                    self.context.new_rvalue_zero(ty_usize),
+                );
+                let block_condition = block_continue.get_function().new_block("condition");
+                let block_start = block_continue.get_function().new_block("start");
+                let block_end = block_continue.get_function().new_block("end");
+                block_continue.end_with_jump(None, block_condition);
+                block_condition.end_with_conditional(
+                    None,
+                    self.context.new_comparison(
+                        None,
+                        ComparisonOp::LessThan,
+                        lvalue_index.to_rvalue(),
+                        lvalue_count,
+                    ),
+                    block_start,
+                    block_end,
+                );
+                self.block = Some(block_start);
+                self.compile_copy(
+                    element_type,
+                    self.context.new_array_access(
+                        None,
+                        lvalue_values.to_rvalue(),
+                        lvalue_index.to_rvalue(),
+                    ),
+                    self.context
+                        .new_array_access(
+                            None,
+                            lvalue_initial.access_field(None, field_values).to_rvalue(),
+                            lvalue_index.to_rvalue(),
+                        )
+                        .to_rvalue(),
+                );
+                let block = self.block.expect("should not end block after a copy");
+                block.add_assignment_op(
+                    None,
+                    lvalue_index,
+                    BinaryOp::Plus,
+                    self.context.new_rvalue_one(ty_usize),
+                );
+                block.end_with_jump(None, block_condition);
+                self.block = Some(block_end);
+            }
+            _ => todo!(),
+        }
     }
 
     fn compile_loop(&mut self, stmt: &Statement) {
@@ -715,10 +1118,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             block_start,
         );
         let block_end = block.get_function().new_block("end");
-        self.loop_ends.push(block_end);
+        self.loop_ends.push((block_end, self.types.len()));
+        self.push_scope();
         self.block = Some(block_start);
         self.compile_statement(stmt);
         let block = self.block;
+        self.pop_scope();
         self.loop_ends.pop().expect("loop stack is empty");
         block
             .unwrap_or_else(|| panic!("loop doesn't iterate at {}:{}", line + 1, column + 1))
@@ -735,23 +1140,48 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         else {
             unreachable!("should only be called with a break");
         };
+        let (block_end, len) = *self.loop_ends.last().unwrap_or_else(|| {
+            panic!(
+                "break should be called from loop at {}:{}",
+                line + 1,
+                column + 1
+            )
+        });
+        for index in (len + 1..self.types.len()).rev() {
+            self.free_scope(index);
+        }
         let block = self
             .block
-            .expect("should only be called with a valid block");
+            .expect("cleaning scope should not terminate the block");
         block.end_with_jump(
             Some(
                 self.context
                     .new_location(TMP_FILENAME, line as i32 + 1, column as i32 + 1),
             ),
-            *self.loop_ends.last().unwrap_or_else(|| {
-                panic!(
-                    "break should be called from loop at {}:{}",
-                    line + 1,
-                    column + 1
-                )
-            }),
+            block_end,
         );
         self.block = None;
+    }
+
+    fn compile_zero_initialization(&mut self, ty: &ConcreteType, lvalue: LValue<'a>) {
+        let gccjit_type = self.get_gccjit_type(ty);
+        self.block
+            .expect("should only be called with a non-terminated block")
+            .add_assignment(
+                None,
+                lvalue,
+                if let ConcreteType::Boolean
+                | ConcreteType::Natural
+                | ConcreteType::Whole
+                | ConcreteType::Real
+                | ConcreteType::Character = ty
+                {
+                    self.context.new_rvalue_zero(gccjit_type)
+                } else {
+                    self.context
+                        .new_struct_constructor(None, gccjit_type, None, &[])
+                },
+            )
     }
 
     fn compile_variable(&mut self, stmt: &Statement) {
@@ -779,11 +1209,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             .expect("scope is empty")
             .entry(name.name.clone())
             .or_default()
-            .push(BoundType::Noun(concrete_type.clone()));
-        self.variables
-            .last_mut()
-            .expect("scope is empty")
-            .insert(name.name.clone(), variable);
+            .push(BoundType::Noun(concrete_type.clone(), variable));
         if let Some(value) = value {
             let ty = self.get_type(value);
             if ty != concrete_type
@@ -803,25 +1229,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } else {
                 self.context.new_cast(None, rvalue, gccjit_type)
             };
-            block.add_assignment(Some(loc), variable, rvalue);
-        } else if let ConcreteType::Boolean
-        | ConcreteType::Natural
-        | ConcreteType::Whole
-        | ConcreteType::Real
-        | ConcreteType::Character = concrete_type
-        {
-            block.add_assignment(
-                Some(loc),
-                variable,
-                self.context.new_rvalue_zero(gccjit_type),
-            );
+            self.compile_copy(&ty, variable, rvalue);
         } else {
-            block.add_assignment(
-                Some(loc),
-                variable,
-                self.context
-                    .new_struct_constructor(Some(loc), gccjit_type, None, &[]),
-            );
+            self.compile_zero_initialization(&concrete_type, variable);
         }
     }
 
@@ -843,6 +1253,255 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         self.pop_scope();
     }
 
+    fn compile_array_resize(
+        &mut self,
+        line: usize,
+        column: usize,
+        array_type: &ConcreteType,
+        lvalue_old_count: LValue<'a>,
+        lvalue_array: LValue<'a>,
+    ) {
+        let loc = self
+            .context
+            .new_location(TMP_FILENAME, line as i32 + 1, column as i32 + 1);
+        let ConcreteType::Array(element_type) = array_type else {
+            unreachable!("should only be called with an array");
+        };
+        let block = self
+            .block
+            .expect("should only be called with a non-terminated block");
+        let struct_array = self
+            .get_gccjit_type(array_type)
+            .is_struct()
+            .expect("arrays must be represented as structs");
+        let ty_natural = self.context.new_type::<u64>();
+        let ty_usize = self.context.new_type::<usize>();
+        let ty_int = self.context.new_c_type(CType::Int);
+        let ty_element = self.get_gccjit_type(element_type);
+        let lvalue_values = lvalue_array.access_field(Some(loc), struct_array.get_field(0));
+        let lvalue_count = lvalue_array.access_field(Some(loc), struct_array.get_field(1));
+        let lvalue_capacity = lvalue_array.access_field(Some(loc), struct_array.get_field(2));
+        let block_increase = block.get_function().new_block("array capacity increase");
+        let block_else = block.get_function().new_block("array size decrease");
+        block.end_with_conditional(
+            Some(loc),
+            self.context.new_comparison(
+                Some(loc),
+                ComparisonOp::LessThan,
+                lvalue_capacity,
+                lvalue_count,
+            ),
+            block_increase,
+            block_else,
+        );
+        block_increase.add_assignment(Some(loc), lvalue_capacity, lvalue_count);
+        block_increase.add_assignment_op(
+            Some(loc),
+            lvalue_capacity,
+            BinaryOp::BitwiseOr,
+            self.context.new_binary_op(
+                Some(loc),
+                BinaryOp::RShift,
+                ty_natural,
+                lvalue_capacity,
+                self.context.new_rvalue_from_int(ty_natural, 1),
+            ),
+        );
+        block_increase.add_assignment_op(
+            Some(loc),
+            lvalue_capacity,
+            BinaryOp::BitwiseOr,
+            self.context.new_binary_op(
+                Some(loc),
+                BinaryOp::RShift,
+                ty_natural,
+                lvalue_capacity,
+                self.context.new_rvalue_from_int(ty_natural, 2),
+            ),
+        );
+        block_increase.add_assignment_op(
+            Some(loc),
+            lvalue_capacity,
+            BinaryOp::BitwiseOr,
+            self.context.new_binary_op(
+                Some(loc),
+                BinaryOp::RShift,
+                ty_natural,
+                lvalue_capacity,
+                self.context.new_rvalue_from_int(ty_natural, 4),
+            ),
+        );
+        block_increase.add_assignment_op(
+            Some(loc),
+            lvalue_capacity,
+            BinaryOp::BitwiseOr,
+            self.context.new_binary_op(
+                Some(loc),
+                BinaryOp::RShift,
+                ty_natural,
+                lvalue_capacity,
+                self.context.new_rvalue_from_int(ty_natural, 8),
+            ),
+        );
+        block_increase.add_assignment_op(
+            Some(loc),
+            lvalue_capacity,
+            BinaryOp::BitwiseOr,
+            self.context.new_binary_op(
+                Some(loc),
+                BinaryOp::RShift,
+                ty_natural,
+                lvalue_capacity,
+                self.context.new_rvalue_from_int(ty_natural, 16),
+            ),
+        );
+        block_increase.add_assignment_op(
+            Some(loc),
+            lvalue_capacity,
+            BinaryOp::BitwiseOr,
+            self.context.new_binary_op(
+                Some(loc),
+                BinaryOp::RShift,
+                ty_natural,
+                lvalue_capacity,
+                self.context.new_rvalue_from_int(ty_natural, 32),
+            ),
+        );
+        block_increase.add_assignment(
+            Some(loc),
+            lvalue_values,
+            self.context.new_cast(
+                Some(loc),
+                self.context.new_call(
+                    Some(loc),
+                    self.functions["realloc"],
+                    &[
+                        self.context.new_cast(
+                            Some(loc),
+                            lvalue_values.to_rvalue(),
+                            self.context.new_type::<()>().make_pointer(),
+                        ),
+                        self.context.new_binary_op(
+                            Some(loc),
+                            BinaryOp::Mult,
+                            ty_usize,
+                            lvalue_capacity,
+                            self.context.new_cast(
+                                Some(loc),
+                                self.context.new_sizeof(ty_element),
+                                ty_usize,
+                            ),
+                        ),
+                    ],
+                ),
+                ty_element.make_pointer(),
+            ),
+        );
+        let block_error = block_increase.get_function().new_block("alloc error");
+        let block_zero = block_increase
+            .get_function()
+            .new_block("zero initialization");
+        block_increase.end_with_conditional(
+            Some(loc),
+            self.context.new_comparison(
+                Some(loc),
+                ComparisonOp::Equals,
+                lvalue_values,
+                self.context.new_null(ty_element.make_pointer()),
+            ),
+            block_error,
+            block_zero,
+        );
+        block_error.add_eval(
+            Some(loc),
+            self.context.new_call(
+                Some(loc),
+                self.functions["printf"],
+                &[self.context.new_string_literal(format!(
+                    "error resizing array at {}:{}",
+                    line + 1,
+                    column + 1
+                ))],
+            ),
+        );
+        block_error.add_eval(
+            Some(loc),
+            self.context.new_call(
+                Some(loc),
+                self.functions["exit"],
+                &[self.context.new_rvalue_one(ty_int)],
+            ),
+        );
+        block_error.end_with_jump(Some(loc), block_zero);
+        let block_zero_loop = block_zero
+            .get_function()
+            .new_block("zero initialization loop");
+        let block_continue = block_zero.get_function().new_block("after array resize");
+        block_zero.end_with_conditional(
+            Some(loc),
+            self.context.new_comparison(
+                Some(loc),
+                ComparisonOp::LessThan,
+                lvalue_old_count,
+                self.context.new_cast(Some(loc), lvalue_count, ty_natural),
+            ),
+            block_zero_loop,
+            block_continue,
+        );
+        self.block = Some(block_zero_loop);
+        self.compile_zero_initialization(
+            element_type,
+            self.context
+                .new_array_access(Some(loc), lvalue_values, lvalue_old_count),
+        );
+        let block = self
+            .block
+            .expect("block should not be empty after zero initialization");
+        block.add_assignment_op(
+            Some(loc),
+            lvalue_old_count,
+            BinaryOp::Plus,
+            self.context.new_rvalue_one(ty_natural),
+        );
+        block.end_with_jump(Some(loc), block_zero);
+        let block_loop = block_else.get_function().new_block("resize free loop");
+        block_else.end_with_conditional(
+            Some(loc),
+            self.context.new_comparison(
+                Some(loc),
+                ComparisonOp::GreaterThan,
+                lvalue_old_count,
+                self.context.new_cast(Some(loc), lvalue_count, ty_natural),
+            ),
+            block_loop,
+            block_continue,
+        );
+        self.block = Some(block_loop);
+        self.compile_free(
+            element_type,
+            self.context.new_array_access(
+                Some(loc),
+                lvalue_values,
+                self.context.new_binary_op(
+                    Some(loc),
+                    BinaryOp::Minus,
+                    ty_natural,
+                    lvalue_old_count,
+                    self.context.new_rvalue_one(ty_natural),
+                ),
+            ),
+        );
+        let block = self.block.expect("free should not terminate the block");
+        block.add_assignment_op(
+            Some(loc),
+            lvalue_old_count,
+            BinaryOp::Minus,
+            self.context.new_rvalue_one(ty_natural),
+        );
+        block.end_with_jump(Some(loc), block_else);
+        self.block = Some(block_continue);
+    }
+
     fn compile_procedure_call(&mut self, stmt: &Statement) {
         let &Statement {
             statement_type: StatementType::Call(ref args, ref name),
@@ -859,6 +1518,72 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             .context
             .new_location(TMP_FILENAME, line as i32 + 1, column as i32 + 1);
         match (name.name.as_str(), args.as_slice()) {
+            ("ал", [arg]) => {
+                let array_type = self.get_type(arg);
+                let ConcreteType::Array(ty) = &array_type else {
+                    panic!("expected array at {}:{}", arg.line + 1, arg.column + 1);
+                };
+                let ty_usize = self.context.new_type::<usize>();
+                let struct_array = self
+                    .get_gccjit_type(&array_type)
+                    .is_struct()
+                    .expect("arrays should always be represented as structs");
+                let lvalue_array = self.compile_lvalue(arg);
+                let block = self
+                    .block
+                    .expect("block must not be terminated after compiling an expression");
+                let lvalue_values = lvalue_array.access_field(Some(loc), struct_array.get_field(0));
+                let lvalue_count = lvalue_array.access_field(Some(loc), struct_array.get_field(1));
+                let block_then = block.get_function().new_block("then");
+                let block_else = block.get_function().new_block("else");
+                block.end_with_conditional(
+                    Some(loc),
+                    self.context.new_comparison(
+                        Some(loc),
+                        ComparisonOp::Equals,
+                        lvalue_count.to_rvalue(),
+                        self.context.new_rvalue_zero(ty_usize),
+                    ),
+                    block_then,
+                    block_else,
+                );
+                block_then.add_eval(
+                    Some(loc),
+                    self.context.new_call(
+                        Some(loc),
+                        self.functions["printf"],
+                        &[self.context.new_string_literal(format!(
+                            "attempt to pop an empty array at {}:{}",
+                            arg.line + 1,
+                            arg.column + 1
+                        ))],
+                    ),
+                );
+                block_then.add_eval(
+                    Some(loc),
+                    self.context.new_call(
+                        Some(loc),
+                        self.functions["exit"],
+                        &[self
+                            .context
+                            .new_rvalue_one(self.context.new_c_type(CType::Int))],
+                    ),
+                );
+                block_then.end_with_jump(Some(loc), block_else);
+                block_else.add_assignment_op(
+                    Some(loc),
+                    lvalue_count,
+                    BinaryOp::Minus,
+                    self.context.new_rvalue_one(ty_usize),
+                );
+                self.block = Some(block_else);
+                self.compile_free(
+                    ty,
+                    self.context
+                        .new_array_access(Some(loc), lvalue_values, lvalue_count),
+                );
+                return;
+            }
             ("жаз", [arg]) => {
                 match self.get_type(arg) {
                     ConcreteType::Boolean => {
@@ -880,9 +1605,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 &[self.context.new_string_literal("Жалған\n")],
                             ),
                         );
+                        let rvalue_condition = self.compile_expression(arg);
+                        let block = self
+                            .block
+                            .expect("block must not be terminated after compiling an expression");
                         block.end_with_conditional(
                             Some(loc),
-                            self.compile_expression(arg),
+                            rvalue_condition,
                             block_true,
                             block_false,
                         );
@@ -893,41 +1622,44 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         return;
                     }
                     ConcreteType::Natural => {
+                        let rvalue = self.compile_expression(arg);
+                        let block = self
+                            .block
+                            .expect("block must not be terminated after compiling an expression");
                         block.add_eval(
                             Some(loc),
                             self.context.new_call(
                                 Some(loc),
                                 self.functions["printf"],
-                                &[
-                                    self.context.new_string_literal("%llu\n"),
-                                    self.compile_expression(arg),
-                                ],
+                                &[self.context.new_string_literal("%llu\n"), rvalue],
                             ),
                         );
                     }
                     ConcreteType::Whole => {
+                        let rvalue = self.compile_expression(arg);
+                        let block = self
+                            .block
+                            .expect("block must not be terminated after compiling an expression");
                         block.add_eval(
                             Some(loc),
                             self.context.new_call(
                                 Some(loc),
                                 self.functions["printf"],
-                                &[
-                                    self.context.new_string_literal("%lld\n"),
-                                    self.compile_expression(arg),
-                                ],
+                                &[self.context.new_string_literal("%lld\n"), rvalue],
                             ),
                         );
                     }
                     ConcreteType::Real => {
+                        let rvalue = self.compile_expression(arg);
+                        let block = self
+                            .block
+                            .expect("block must not be terminated after compiling an expression");
                         block.add_eval(
                             Some(loc),
                             self.context.new_call(
                                 Some(loc),
                                 self.functions["printf"],
-                                &[
-                                    self.context.new_string_literal("%f\n"),
-                                    self.compile_expression(arg),
-                                ],
+                                &[self.context.new_string_literal("%f\n"), rvalue],
                             ),
                         );
                     }
@@ -962,6 +1694,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     .expect("should only be called with arrays");
                 let lvalue = self.compile_lvalue(variable);
                 let rvalue = self.compile_expression(value);
+                let block = self
+                    .block
+                    .expect("block must not be terminated after compiling an expression");
                 let block_capacity = block.get_function().new_block("capacity");
                 let block_error = block.get_function().new_block("error");
                 let block_push = block.get_function().new_block("push");
@@ -980,12 +1715,24 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     block_capacity,
                     block_push,
                 );
-                block_capacity.add_assignment_op(
+                block_capacity.add_assignment(
                     None,
                     lvalue.access_field(None, gccjit_type.get_field(2)),
-                    BinaryOp::Mult,
-                    self.context
-                        .new_rvalue_from_int(self.context.new_type::<usize>(), 2),
+                    self.context.new_binary_op(
+                        None,
+                        BinaryOp::Plus,
+                        self.context.new_type::<usize>(),
+                        self.context.new_binary_op(
+                            None,
+                            BinaryOp::Mult,
+                            self.context.new_type::<usize>(),
+                            lvalue.access_field(None, gccjit_type.get_field(2)),
+                            self.context
+                                .new_rvalue_from_int(self.context.new_type::<usize>(), 2),
+                        ),
+                        self.context
+                            .new_rvalue_from_int(self.context.new_type::<usize>(), 1),
+                    ),
                 );
                 block_capacity.add_assignment(
                     None,
@@ -1003,9 +1750,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                         .to_rvalue(),
                                     self.context.new_type::<()>().make_pointer(),
                                 ),
-                                lvalue
-                                    .access_field(None, gccjit_type.get_field(2))
-                                    .to_rvalue(),
+                                self.context.new_binary_op(
+                                    None,
+                                    BinaryOp::Mult,
+                                    self.context.new_type::<usize>(),
+                                    lvalue
+                                        .access_field(None, gccjit_type.get_field(2))
+                                        .to_rvalue(),
+                                    self.context.new_cast(
+                                        Some(loc),
+                                        self.context.new_sizeof(self.get_gccjit_type(ty)),
+                                        self.context.new_type::<usize>(),
+                                    ),
+                                ),
                             ],
                         ),
                         self.get_gccjit_type(ty).make_pointer(),
@@ -1030,7 +1787,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     self.context.new_call(
                         None,
                         self.functions["printf"],
-                        &[self.context.new_string_literal(&format!(
+                        &[self.context.new_string_literal(format!(
                             "error pushing into array, out of memory at {}:{}",
                             line + 1,
                             column + 1
@@ -1072,6 +1829,16 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             ("оқы", [variable]) => {
                 match self.get_type(variable) {
                     ConcreteType::Natural => {
+                        let ty_natural = self.context.new_type::<u64>();
+                        let lvalue_old =
+                            block
+                                .get_function()
+                                .new_local(Some(loc), ty_natural, "old value");
+                        let lvalue = self.compile_lvalue(variable);
+                        block.add_assignment(Some(loc), lvalue_old, lvalue);
+                        let block = self
+                            .block
+                            .expect("block must not be terminated after compiling an expression");
                         block.add_eval(
                             Some(loc),
                             self.context.new_call(
@@ -1079,34 +1846,51 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 self.functions["scanf"],
                                 &[
                                     self.context.new_string_literal("%llu"),
-                                    self.compile_lvalue(variable).get_address(None),
+                                    lvalue.get_address(Some(loc)),
                                 ],
                             ),
                         );
+                        if let ExpressionType::Field(expr, ident) = &variable.expression_type {
+                            let array_type = self.get_type(expr);
+                            if let (ConcreteType::Array(_), "Саны") =
+                                (&array_type, ident.name.as_str())
+                            {
+                                let lvalue = self.compile_lvalue(expr);
+                                self.compile_array_resize(
+                                    line,
+                                    column,
+                                    &array_type,
+                                    lvalue_old,
+                                    lvalue,
+                                );
+                            }
+                        }
                     }
                     ConcreteType::Whole => {
+                        let lvalue = self.compile_lvalue(variable).get_address(None);
+                        let block = self
+                            .block
+                            .expect("block must not be terminated after compiling an expression");
                         block.add_eval(
                             Some(loc),
                             self.context.new_call(
                                 Some(loc),
                                 self.functions["scanf"],
-                                &[
-                                    self.context.new_string_literal("%lld"),
-                                    self.compile_lvalue(variable).get_address(None),
-                                ],
+                                &[self.context.new_string_literal("%lld"), lvalue],
                             ),
                         );
                     }
                     ConcreteType::Real => {
+                        let lvalue = self.compile_lvalue(variable).get_address(None);
+                        let block = self
+                            .block
+                            .expect("block must not be terminated after compiling an expression");
                         block.add_eval(
                             Some(loc),
                             self.context.new_call(
                                 Some(loc),
                                 self.functions["scanf"],
-                                &[
-                                    self.context.new_string_literal("%lf"),
-                                    self.compile_lvalue(variable).get_address(None),
-                                ],
+                                &[self.context.new_string_literal("%lf"), lvalue],
                             ),
                         );
                     }
@@ -1130,6 +1914,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 }
                 let lvalue = self.compile_lvalue(variable);
                 let rvalue = self.compile_expression(value);
+                let gccjit_type = self.get_gccjit_type(&ty_variable);
                 let rvalue = if ty_variable == ty_value {
                     rvalue
                 } else {
@@ -1140,10 +1925,25 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             value.column as i32 + 1,
                         )),
                         rvalue,
-                        self.get_gccjit_type(&ty_variable),
+                        gccjit_type,
                     )
                 };
-                block.add_assignment(Some(loc), lvalue, rvalue);
+                self.compile_free(&ty_variable, lvalue);
+                let block = self.block.expect("block must not terminate after free");
+                let lvalue_old =
+                    block
+                        .get_function()
+                        .new_local(Some(loc), gccjit_type, "old value");
+                block.add_assignment(Some(loc), lvalue_old, lvalue);
+                self.compile_copy(&ty_variable, lvalue, rvalue);
+                if let ExpressionType::Field(expr, ident) = &variable.expression_type {
+                    let array_type = self.get_type(expr);
+                    if let (ConcreteType::Array(_), "Саны") = (&array_type, ident.name.as_str())
+                    {
+                        let lvalue = self.compile_lvalue(expr);
+                        self.compile_array_resize(line, column, &array_type, lvalue_old, lvalue);
+                    }
+                }
                 return;
             }
             // TODO: More
@@ -1352,11 +2152,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             );
             types
         });
-        self.variables.push(HashMap::new());
+        self.push_scope();
         self.compile_statement(stmt);
-        self.block
-            .expect("can only return from a function or a procedure")
-            .end_with_return(None, self.context.new_rvalue_zero(ty_int));
+        let block = self
+            .block
+            .expect("can only return from a function or a procedure");
+        self.pop_scope();
+        block.end_with_return(None, self.context.new_rvalue_zero(ty_int));
+        self.context.dump_to_file("tmp", true);
         self.context.compile_to_file(OutputKind::Executable, "main");
     }
 }
@@ -1367,7 +2170,6 @@ pub fn compile(stmt: &Statement) {
         context: &context,
         block: None,
         types: Vec::new(),
-        variables: Vec::new(),
         gccjit_types: HashMap::new(),
         functions: {
             let mut functions = HashMap::new();
@@ -1379,7 +2181,18 @@ pub fn compile(stmt: &Statement) {
                     context.new_type::<()>(),
                     &[context.new_parameter(None, context.new_c_type(CType::Int), "code")],
                     "exit",
-                    true,
+                    false,
+                ),
+            );
+            functions.insert(
+                "free".to_string(),
+                context.new_function(
+                    None,
+                    FunctionType::Extern,
+                    context.new_type::<()>(),
+                    &[context.new_parameter(None, context.new_type::<()>().make_pointer(), "ptr")],
+                    "free",
+                    false,
                 ),
             );
             functions.insert(
@@ -1408,7 +2221,7 @@ pub fn compile(stmt: &Statement) {
                         context.new_parameter(None, context.new_type::<usize>(), "size"),
                     ],
                     "realloc",
-                    true,
+                    false,
                 ),
             );
             functions.insert(
