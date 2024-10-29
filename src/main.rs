@@ -1,14 +1,6 @@
-use std::fs;
+use std::env;
 #[cfg(not(debug_assertions))]
-use std::{env, panic};
-
-use compiler::IrCompiler;
-use parser::Parser;
-
-mod codegen;
-mod compiler;
-mod lexer;
-mod parser;
+use std::panic;
 
 fn main() {
     #[cfg(not(debug_assertions))]
@@ -28,12 +20,8 @@ fn main() {
             }
         }));
     }
-    let function = IrCompiler::new().compile(
-        &Parser::new(lexer::tokenize(
-            &fs::read_to_string("main.qol").expect("error reading file"),
-        ))
-        .parse(),
-    );
-    println!("{function:?}");
-    codegen::compile(function);
+    match env::args_os().nth(1) {
+        Some(s) if s == "run" => qol::run("main.qol"),
+        _ => qol::compile("main.qol"),
+    }
 }
