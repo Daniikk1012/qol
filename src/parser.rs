@@ -13,89 +13,89 @@ impl BinaryOperator {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Identifier {
+pub struct AstIdentifier {
     pub name: String,
     pub line: usize,
     pub column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ExpressionType {
+pub enum AstExpressionType {
     Boolean(bool),
     Natural(u64),
     Real(f64),
     Character(char),
     String(String),
     Noun(String),
-    Negate(Box<Expression>),
-    BinaryOperation(Box<Expression>, BinaryOperator, Box<Expression>),
-    Field(Box<Expression>, Identifier),
-    Call(Vec<Expression>, Identifier),
+    Negate(Box<AstExpression>),
+    BinaryOperation(Box<AstExpression>, BinaryOperator, Box<AstExpression>),
+    Field(Box<AstExpression>, AstIdentifier),
+    Call(Vec<AstExpression>, AstIdentifier),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Expression {
-    pub expression_type: ExpressionType,
+pub struct AstExpression {
+    pub expression_type: AstExpressionType,
     pub line: usize,
     pub column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Type(pub Vec<Type>, pub Identifier);
+pub struct AstType(pub Vec<AstType>, pub AstIdentifier);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Argument {
+pub struct AstArgument {
     external: bool,
-    ty: Type,
-    ident: Identifier,
+    ty: AstType,
+    ident: AstIdentifier,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum StatementType {
+pub enum AstStatementType {
     // Conditional
-    Conditional(Expression, Box<Statement>, Option<Box<Statement>>),
+    Conditional(AstExpression, Box<AstStatement>, Option<Box<AstStatement>>),
     // Loop
-    Loop(Box<Statement>),
+    Loop(Box<AstStatement>),
     Break,
     // Definitions
-    Constant(Expression, Type, Identifier),
-    Variable(Option<Expression>, Type, Identifier),
+    Constant(AstExpression, AstType, AstIdentifier),
+    Variable(Option<AstExpression>, AstType, AstIdentifier),
     FunctionLike {
-        params: Option<Vec<Identifier>>,
-        args: Vec<Argument>,
-        ty: Option<Type>,
-        ident: Identifier,
-        statement: Option<Box<Statement>>,
+        params: Option<Vec<AstIdentifier>>,
+        args: Vec<AstArgument>,
+        ty: Option<AstType>,
+        ident: AstIdentifier,
+        statement: Option<Box<AstStatement>>,
     },
     Type {
-        params: Vec<Identifier>,
-        fields: Vec<(Type, Identifier)>,
-        ident: Identifier,
+        params: Vec<AstIdentifier>,
+        fields: Vec<(AstType, AstIdentifier)>,
+        ident: AstIdentifier,
     },
     // Block
-    Block(Vec<Statement>),
+    Block(Vec<AstStatement>),
     // Functions
-    Call(Vec<Expression>, Identifier),
-    Return(Option<Expression>),
+    Call(Vec<AstExpression>, AstIdentifier),
+    Return(Option<AstExpression>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Statement {
-    pub statement_type: StatementType,
+pub struct AstStatement {
+    pub statement_type: AstStatementType,
     pub line: usize,
     pub column: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NameType {
+enum AstNameType {
     Noun,
     Function(usize),
     Procedure,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct Scope {
-    names: HashMap<String, NameType>,
+struct AstScope {
+    names: HashMap<String, AstNameType>,
     types: HashMap<String, usize>,
 }
 
@@ -103,36 +103,41 @@ struct Scope {
 pub struct Parser {
     tokens: Vec<Token>,
     index: usize,
-    scopes: Vec<Scope>,
+    scopes: Vec<AstScope>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         let mut names = HashMap::new();
-        names.insert("емес".to_string(), NameType::Function(1));
-        names.insert("артық".to_string(), NameType::Function(2));
-        names.insert("кем".to_string(), NameType::Function(2));
-        names.insert("қалдық".to_string(), NameType::Function(2));
-        names.insert("тең".to_string(), NameType::Function(2));
-        names.insert("ал".to_string(), NameType::Procedure);
-        names.insert("жаз".to_string(), NameType::Procedure);
-        names.insert("қос".to_string(), NameType::Procedure);
-        names.insert("оқы".to_string(), NameType::Procedure);
-        names.insert("орнат".to_string(), NameType::Procedure);
+        names.insert("натурал".to_string(), AstNameType::Function(1));
+        names.insert("бүтін".to_string(), AstNameType::Function(1));
+        names.insert("нақты".to_string(), AstNameType::Function(1));
+        names.insert("символ".to_string(), AstNameType::Function(1));
+        names.insert("емес".to_string(), AstNameType::Function(1));
+        names.insert("артық".to_string(), AstNameType::Function(2));
+        names.insert("кем".to_string(), AstNameType::Function(2));
+        names.insert("қалдық".to_string(), AstNameType::Function(2));
+        names.insert("тең".to_string(), AstNameType::Function(2));
+        names.insert("ал".to_string(), AstNameType::Procedure);
+        names.insert("жаз".to_string(), AstNameType::Procedure);
+        names.insert("қос".to_string(), AstNameType::Procedure);
+        names.insert("оқы".to_string(), AstNameType::Procedure);
+        names.insert("орнат".to_string(), AstNameType::Procedure);
         let mut types = HashMap::new();
         types.insert("логикалық".to_string(), 0);
         types.insert("натурал".to_string(), 0);
         types.insert("бүтін".to_string(), 0);
         types.insert("нақты".to_string(), 0);
+        types.insert("символ".to_string(), 0);
         types.insert("жиым".to_string(), 1);
         Self {
             tokens,
             index: 0,
-            scopes: vec![Scope { names, types }],
+            scopes: vec![AstScope { names, types }],
         }
     }
 
-    fn get_name_type(&self, name: &str) -> Option<NameType> {
+    fn get_name_type(&self, name: &str) -> Option<AstNameType> {
         for scope in self.scopes.iter().rev() {
             if let Some(&name_type) = scope.names.get(name) {
                 return Some(name_type);
@@ -194,33 +199,33 @@ impl Parser {
         }
     }
 
-    fn parse_term(&mut self) -> Option<Expression> {
+    fn parse_term(&mut self) -> Option<AstExpression> {
         let &Token {
             ref token_type,
             line,
             column,
         } = self.token()?;
         let mut result = 'expr: {
-            Expression {
+            AstExpression {
                 expression_type: 'expression_type: {
                     let expression_type = match token_type {
-                        TokenType::Keyword(Keyword::True) => ExpressionType::Boolean(true),
-                        TokenType::Keyword(Keyword::False) => ExpressionType::Boolean(false),
-                        &TokenType::Natural(number) => ExpressionType::Natural(number),
-                        &TokenType::Real(number) => ExpressionType::Real(number),
-                        &TokenType::Character(ch) => ExpressionType::Character(ch),
-                        TokenType::String(string) => ExpressionType::String(string.clone()),
+                        TokenType::Keyword(Keyword::True) => AstExpressionType::Boolean(true),
+                        TokenType::Keyword(Keyword::False) => AstExpressionType::Boolean(false),
+                        &TokenType::Natural(number) => AstExpressionType::Natural(number),
+                        &TokenType::Real(number) => AstExpressionType::Real(number),
+                        &TokenType::Character(ch) => AstExpressionType::Character(ch),
+                        TokenType::String(string) => AstExpressionType::String(string.clone()),
                         TokenType::Identifier(name)
                             if self
                                 .get_name_type(name)
-                                .map_or(false, |name_type| name_type == NameType::Noun) =>
+                                .map_or(false, |name_type| name_type == AstNameType::Noun) =>
                         {
-                            ExpressionType::Noun(name.clone())
+                            AstExpressionType::Noun(name.clone())
                         }
                         TokenType::BinaryOperator(BinaryOperator::Subtract) => {
                             self.next_token();
                             if let Some(result) = self.parse_term() {
-                                break 'expression_type ExpressionType::Negate(Box::new(result));
+                                break 'expression_type AstExpressionType::Negate(Box::new(result));
                             } else {
                                 self.expect("an expression");
                             };
@@ -267,10 +272,10 @@ impl Parser {
             else {
                 self.expect("an identifier");
             };
-            result = Expression {
-                expression_type: ExpressionType::Field(
+            result = AstExpression {
+                expression_type: AstExpressionType::Field(
                     Box::new(result),
-                    Identifier {
+                    AstIdentifier {
                         name: name.clone(),
                         line,
                         column,
@@ -283,7 +288,7 @@ impl Parser {
         }
     }
 
-    fn parse_postfix_operation(&mut self) -> Option<Expression> {
+    fn parse_postfix_operation(&mut self) -> Option<AstExpression> {
         let mut stack = Vec::new();
         let mut last_index = None;
         loop {
@@ -300,7 +305,7 @@ impl Parser {
                 column,
             }) = self.token()
             {
-                if let Some(NameType::Function(count)) = self.get_name_type(name) {
+                if let Some(AstNameType::Function(count)) = self.get_name_type(name) {
                     if stack.len() < count {
                         panic!(
                             "not enough arguments for function {name} at {}:{}",
@@ -309,10 +314,10 @@ impl Parser {
                         );
                     }
                     let args = stack.drain(stack.len() - count..).collect();
-                    stack.push(Expression {
-                        expression_type: ExpressionType::Call(
+                    stack.push(AstExpression {
+                        expression_type: AstExpressionType::Call(
                             args,
-                            Identifier {
+                            AstIdentifier {
                                 name: name.clone(),
                                 line,
                                 column,
@@ -339,7 +344,7 @@ impl Parser {
         }
     }
 
-    fn parse_binary_operation(&mut self, priority: u32) -> Option<Expression> {
+    fn parse_binary_operation(&mut self, priority: u32) -> Option<AstExpression> {
         let mut result = self.parse_postfix_operation()?;
         loop {
             let (operator, line, column) = match self.token() {
@@ -354,8 +359,8 @@ impl Parser {
             let Some(rhs) = self.parse_binary_operation(priority + 1) else {
                 self.expect("an expression");
             };
-            result = Expression {
-                expression_type: ExpressionType::BinaryOperation(
+            result = AstExpression {
+                expression_type: AstExpressionType::BinaryOperation(
                     Box::new(result),
                     operator,
                     Box::new(rhs),
@@ -366,11 +371,11 @@ impl Parser {
         }
     }
 
-    fn parse_expression(&mut self) -> Option<Expression> {
+    fn parse_expression(&mut self) -> Option<AstExpression> {
         self.parse_binary_operation(0)
     }
 
-    fn parse_conditional(&mut self) -> Option<Statement> {
+    fn parse_conditional(&mut self) -> Option<AstStatement> {
         let Some(&Token {
             token_type: TokenType::Keyword(Keyword::If),
             line,
@@ -394,14 +399,14 @@ impl Parser {
         let Some(then_stmt) = self.parse_statement() else {
             self.expect("a statement for the 'then' branch");
         };
-        Some(Statement {
+        Some(AstStatement {
             statement_type: 'statement_type: {
                 let Some(Token {
                     token_type: TokenType::Keyword(Keyword::Else),
                     ..
                 }) = self.token()
                 else {
-                    break 'statement_type StatementType::Conditional(
+                    break 'statement_type AstStatementType::Conditional(
                         expr,
                         Box::new(then_stmt),
                         None,
@@ -411,14 +416,14 @@ impl Parser {
                 let Some(else_stmt) = self.parse_statement() else {
                     self.expect("a statement for the 'else' branch");
                 };
-                StatementType::Conditional(expr, Box::new(then_stmt), Some(Box::new(else_stmt)))
+                AstStatementType::Conditional(expr, Box::new(then_stmt), Some(Box::new(else_stmt)))
             },
             line,
             column,
         })
     }
 
-    fn parse_loop(&mut self) -> Option<Statement> {
+    fn parse_loop(&mut self) -> Option<AstStatement> {
         let Some(&Token {
             token_type: TokenType::Keyword(Keyword::Loop),
             line,
@@ -431,14 +436,14 @@ impl Parser {
         let Some(stmt) = self.parse_statement() else {
             self.expect("a statement");
         };
-        Some(Statement {
-            statement_type: StatementType::Loop(Box::new(stmt)),
+        Some(AstStatement {
+            statement_type: AstStatementType::Loop(Box::new(stmt)),
             line,
             column,
         })
     }
 
-    fn parse_break(&mut self) -> Option<Statement> {
+    fn parse_break(&mut self) -> Option<AstStatement> {
         let Some(&Token {
             token_type: TokenType::Keyword(Keyword::Break),
             line,
@@ -448,14 +453,14 @@ impl Parser {
             return None;
         };
         self.next_token();
-        Some(Statement {
-            statement_type: StatementType::Break,
+        Some(AstStatement {
+            statement_type: AstStatementType::Break,
             line,
             column,
         })
     }
 
-    fn parse_type(&mut self, end_index: usize) -> Type {
+    fn parse_type(&mut self, end_index: usize) -> AstType {
         let mut stack = Vec::new();
         while self.index < end_index {
             let Some(&Token {
@@ -472,9 +477,9 @@ impl Parser {
             if stack.len() < params {
                 self.unexpected();
             }
-            let ty = Type(
+            let ty = AstType(
                 stack.drain(stack.len() - params..).collect(),
-                Identifier {
+                AstIdentifier {
                     name: name.clone(),
                     line,
                     column,
@@ -489,7 +494,7 @@ impl Parser {
         stack.pop().unwrap()
     }
 
-    fn parse_definition(&mut self) -> Option<Statement> {
+    fn parse_definition(&mut self) -> Option<AstStatement> {
         let statement_start_index = self.index;
         let &Token {
             ref token_type,
@@ -514,7 +519,7 @@ impl Parser {
                 column,
             }) = self.token()
             {
-                params.push(Identifier {
+                params.push(AstIdentifier {
                     name: name.clone(),
                     line,
                     column,
@@ -618,23 +623,23 @@ impl Parser {
                     .last_mut()
                     .unwrap()
                     .names
-                    .insert(name.clone(), NameType::Noun);
-                Some(Statement {
+                    .insert(name.clone(), AstNameType::Noun);
+                Some(AstStatement {
                     statement_type: if keyword == Keyword::Constant {
-                        StatementType::Constant(
+                        AstStatementType::Constant(
                             value.unwrap(),
                             ty,
-                            Identifier {
+                            AstIdentifier {
                                 name,
                                 line: name_line,
                                 column: name_column,
                             },
                         )
                     } else {
-                        StatementType::Variable(
+                        AstStatementType::Variable(
                             value,
                             ty,
-                            Identifier {
+                            AstIdentifier {
                                 name,
                                 line: name_line,
                                 column: name_column,
@@ -650,7 +655,7 @@ impl Parser {
                     self.index = statement_start_index;
                     self.unexpected();
                 }
-                self.scopes.push(Scope {
+                self.scopes.push(AstScope {
                     names: HashMap::new(),
                     types: if let Some(params) = params.as_ref() {
                         let mut types = HashMap::new();
@@ -697,10 +702,10 @@ impl Parser {
                         else {
                             self.expect("an identifier");
                         };
-                        args.push(Argument {
+                        args.push(AstArgument {
                             external,
                             ty,
-                            ident: Identifier {
+                            ident: AstIdentifier {
                                 name: name.clone(),
                                 line,
                                 column,
@@ -763,9 +768,9 @@ impl Parser {
                 self.scopes[scopes_len - 2].names.insert(
                     name.clone(),
                     if keyword == Keyword::Procedure {
-                        NameType::Procedure
+                        AstNameType::Procedure
                     } else {
-                        NameType::Function(args.len())
+                        AstNameType::Function(args.len())
                     },
                 );
                 for arg in &args {
@@ -773,7 +778,7 @@ impl Parser {
                         .last_mut()
                         .unwrap()
                         .names
-                        .insert(arg.ident.name.clone(), NameType::Noun);
+                        .insert(arg.ident.name.clone(), AstNameType::Noun);
                 }
                 let statement = if let Some(Token {
                     token_type: TokenType::Keyword(Keyword::Prototype),
@@ -788,8 +793,8 @@ impl Parser {
                     )
                 };
                 self.scopes.pop().unwrap();
-                Some(Statement {
-                    statement_type: StatementType::FunctionLike {
+                Some(AstStatement {
+                    statement_type: AstStatementType::FunctionLike {
                         params: if external {
                             None
                         } else {
@@ -797,7 +802,7 @@ impl Parser {
                         },
                         args,
                         ty,
-                        ident: Identifier {
+                        ident: AstIdentifier {
                             name,
                             line: name_line,
                             column: name_column,
@@ -813,7 +818,7 @@ impl Parser {
                     self.index = statement_start_index;
                     self.unexpected();
                 }
-                self.scopes.push(Scope {
+                self.scopes.push(AstScope {
                     names: HashMap::new(),
                     types: if let Some(params) = params.as_ref() {
                         let mut types = HashMap::new();
@@ -855,7 +860,7 @@ impl Parser {
                     };
                     fields.push((
                         ty,
-                        Identifier {
+                        AstIdentifier {
                             name: name.clone(),
                             line,
                             column,
@@ -894,11 +899,11 @@ impl Parser {
                 }
                 self.next_token();
                 self.scopes.pop().unwrap();
-                Some(Statement {
-                    statement_type: StatementType::Type {
+                Some(AstStatement {
+                    statement_type: AstStatementType::Type {
                         params: params.unwrap_or_else(Vec::new),
                         fields,
-                        ident: Identifier {
+                        ident: AstIdentifier {
                             name,
                             line: name_line,
                             column: name_column,
@@ -912,7 +917,7 @@ impl Parser {
         }
     }
 
-    fn parse_block(&mut self) -> Option<Statement> {
+    fn parse_block(&mut self) -> Option<AstStatement> {
         let Some(&Token {
             token_type: TokenType::Keyword(Keyword::Begin),
             line,
@@ -931,14 +936,14 @@ impl Parser {
             self.expect("an 'end' token");
         };
         self.next_token();
-        Some(Statement {
-            statement_type: StatementType::Block(stmts),
+        Some(AstStatement {
+            statement_type: AstStatementType::Block(stmts),
             line,
             column,
         })
     }
 
-    fn parse_procedure_call(&mut self) -> Option<Statement> {
+    fn parse_procedure_call(&mut self) -> Option<AstStatement> {
         let mut args = Vec::new();
         while let Some(expr) = self.parse_expression() {
             args.push(expr);
@@ -958,14 +963,14 @@ impl Parser {
             if args.len() > 1 {
                 self.unexpected();
             }
-            StatementType::Return(args.pop())
+            AstStatementType::Return(args.pop())
         } else if let TokenType::Identifier(ident) = token_type {
-            if self.get_name_type(ident) != Some(NameType::Procedure) {
+            if self.get_name_type(ident) != Some(AstNameType::Procedure) {
                 self.unexpected();
             }
-            StatementType::Call(
+            AstStatementType::Call(
                 args,
-                Identifier {
+                AstIdentifier {
                     name: ident.clone(),
                     line,
                     column,
@@ -977,14 +982,14 @@ impl Parser {
             self.unexpected();
         };
         self.next_token();
-        Some(Statement {
+        Some(AstStatement {
             statement_type,
             line,
             column,
         })
     }
 
-    fn parse_statement(&mut self) -> Option<Statement> {
+    fn parse_statement(&mut self) -> Option<AstStatement> {
         self.parse_conditional()
             .or_else(|| self.parse_loop())
             .or_else(|| self.parse_break())
@@ -993,7 +998,7 @@ impl Parser {
             .or_else(|| self.parse_procedure_call())
     }
 
-    fn parse_statements(&mut self) -> Vec<Statement> {
+    fn parse_statements(&mut self) -> Vec<AstStatement> {
         let mut stmts = Vec::new();
         while let Some(stmt) = self.parse_statement() {
             stmts.push(stmt);
@@ -1001,13 +1006,13 @@ impl Parser {
         stmts
     }
 
-    pub fn parse(&mut self) -> Statement {
+    pub fn parse(&mut self) -> AstStatement {
         let stmts = self.parse_statements();
         if self.token().is_some() {
             self.unexpected();
         }
-        Statement {
-            statement_type: StatementType::Block(stmts),
+        AstStatement {
+            statement_type: AstStatementType::Block(stmts),
             line: 0,
             column: 0,
         }
