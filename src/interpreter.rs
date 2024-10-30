@@ -1,5 +1,3 @@
-use std::io;
-
 use crate::compiler::{
     IrFunction, IrInstruction, IrInstructionType, IrPrimitiveType, IrTerminatorType, IrVariableType,
 };
@@ -20,6 +18,8 @@ pub fn run(
         temps,
         blocks,
     }: IrFunction,
+    output: impl Fn(&str),
+    input: impl Fn() -> String,
 ) {
     let mut vars: Vec<_> = vars
         .iter()
@@ -247,15 +247,15 @@ pub fn run(
             IrInstructionType::Write => match temps[temp] {
                 PrimitiveValue::Boolean(value) => {
                     if value {
-                        println!("Ақиқат");
+                        output("Ақиқат\n");
                     } else {
-                        println!("Жалған");
+                        output("Жалған\n");
                     }
                 }
-                PrimitiveValue::Natural(value) => println!("{value}"),
-                PrimitiveValue::Whole(value) => println!("{value}"),
-                PrimitiveValue::Real(value) => println!("{value}"),
-                PrimitiveValue::Character(value) => print!("{value}"),
+                PrimitiveValue::Natural(value) => output(&format!("{value}\n")),
+                PrimitiveValue::Whole(value) => output(&format!("{value}\n")),
+                PrimitiveValue::Real(value) => output(&format!("{value}\n")),
+                PrimitiveValue::Character(value) => output(&format!("{value}")),
                 _ => unreachable!(),
             },
             IrInstructionType::Read => {
@@ -267,16 +267,8 @@ pub fn run(
                     PrimitiveValue::Natural(value) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
-                                let mut line = String::new();
-                                io::stdin().read_line(&mut line).unwrap_or_else(|_| {
-                                    panic!(
-                                        "IO error at {}:{}",
-                                        blocks[block].as_ref().unwrap().insts[inst].line + 1,
-                                        blocks[block].as_ref().unwrap().insts[inst].column + 1
-                                    )
-                                });
                                 input_words =
-                                    line.split_whitespace().map(ToOwned::to_owned).collect();
+                                    input().split_whitespace().map(ToOwned::to_owned).collect();
                                 input_words.reverse();
                                 continue;
                             };
@@ -292,16 +284,8 @@ pub fn run(
                     PrimitiveValue::Whole(value) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
-                                let mut line = String::new();
-                                io::stdin().read_line(&mut line).unwrap_or_else(|_| {
-                                    panic!(
-                                        "IO error at {}:{}",
-                                        blocks[block].as_ref().unwrap().insts[inst].line + 1,
-                                        blocks[block].as_ref().unwrap().insts[inst].column + 1
-                                    )
-                                });
                                 input_words =
-                                    line.split_whitespace().map(ToOwned::to_owned).collect();
+                                    input().split_whitespace().map(ToOwned::to_owned).collect();
                                 input_words.reverse();
                                 continue;
                             };
@@ -317,16 +301,8 @@ pub fn run(
                     PrimitiveValue::Real(value) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
-                                let mut line = String::new();
-                                io::stdin().read_line(&mut line).unwrap_or_else(|_| {
-                                    panic!(
-                                        "IO error at {}:{}",
-                                        blocks[block].as_ref().unwrap().insts[inst].line + 1,
-                                        blocks[block].as_ref().unwrap().insts[inst].column + 1
-                                    )
-                                });
                                 input_words =
-                                    line.split_whitespace().map(ToOwned::to_owned).collect();
+                                    input().split_whitespace().map(ToOwned::to_owned).collect();
                                 input_words.reverse();
                                 continue;
                             };
@@ -342,16 +318,8 @@ pub fn run(
                     PrimitiveValue::Character(value) => {
                         *value = loop {
                             let Some(mut word) = input_words.pop() else {
-                                let mut line = String::new();
-                                io::stdin().read_line(&mut line).unwrap_or_else(|_| {
-                                    panic!(
-                                        "IO error at {}:{}",
-                                        blocks[block].as_ref().unwrap().insts[inst].line + 1,
-                                        blocks[block].as_ref().unwrap().insts[inst].column + 1
-                                    )
-                                });
                                 input_words =
-                                    line.split_whitespace().map(ToOwned::to_owned).collect();
+                                    input().split_whitespace().map(ToOwned::to_owned).collect();
                                 input_words.reverse();
                                 continue;
                             };

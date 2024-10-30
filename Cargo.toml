@@ -4,4 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gccjit = { version = "2.3" }
+gccjit = { version = "2.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+default = ["gccjit"]
+wasm = ["dep:wasm-bindgen"]
+
+[lib]
+crate-type = ["lib", "cdylib"]

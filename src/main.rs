@@ -1,3 +1,4 @@
+#[cfg(feature = "gccjit")]
 use std::env;
 #[cfg(not(debug_assertions))]
 use std::panic;
@@ -20,8 +21,11 @@ fn main() {
             }
         }));
     }
+    #[cfg(feature = "gccjit")]
     match env::args_os().nth(1) {
         Some(s) if s == "run" => qol::run("main.qol"),
         _ => qol::compile("main.qol"),
     }
+    #[cfg(not(feature = "gccjit"))]
+    qol::run("main.qol");
 }
