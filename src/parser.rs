@@ -114,6 +114,7 @@ impl Parser {
         names.insert("нақты".to_string(), AstNameType::Function(1));
         names.insert("символ".to_string(), AstNameType::Function(1));
         names.insert("емес".to_string(), AstNameType::Function(1));
+        names.insert("саны".to_string(), AstNameType::Function(1));
         names.insert("артық".to_string(), AstNameType::Function(2));
         names.insert("кем".to_string(), AstNameType::Function(2));
         names.insert("қалдық".to_string(), AstNameType::Function(2));
@@ -123,6 +124,7 @@ impl Parser {
         names.insert("қос".to_string(), AstNameType::Procedure);
         names.insert("оқы".to_string(), AstNameType::Procedure);
         names.insert("орнат".to_string(), AstNameType::Procedure);
+        names.insert("санынОрнат".to_string(), AstNameType::Procedure);
         let mut types = HashMap::new();
         types.insert("логикалық".to_string(), 0);
         types.insert("натурал".to_string(), 0);
@@ -356,7 +358,7 @@ impl Parser {
                 _ => break Some(result),
             };
             self.next_token();
-            let Some(rhs) = self.parse_binary_operation(priority + 1) else {
+            let Some(rhs) = self.parse_binary_operation(operator.priority() + 1) else {
                 self.expect("an expression");
             };
             result = AstExpression {

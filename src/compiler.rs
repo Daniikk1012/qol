@@ -1,4 +1,5 @@
-// TODO Arrays. Also make reduce arguments for some instructions
+// TODO String newlines
+// TODO Fallible IO
 // TODO Short-circuiting
 // TODO Custom functions, procedures, and structures
 // TODO Generics
@@ -37,6 +38,7 @@ pub enum IrInstructionType {
     Divide(usize, usize),
     Remainder(usize, usize),
     Negate(usize),
+    MinimumCapacity(usize),
     // Comparisons
     Equals(usize, usize),
     LessThan(usize, usize),
@@ -50,8 +52,8 @@ pub enum IrInstructionType {
     Assign(usize),
     Dereference(usize),
     // Arrays
-    Resize(usize, usize),
-    Free(usize),
+    Resize(usize),
+    Free,
     // Input/Output
     Write,
     Read,
@@ -65,14 +67,15 @@ pub struct IrInstruction {
     pub column: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrTerminatorType {
     Unconditional(usize),
     Conditional(usize, usize, usize),
     Return(usize),
+    Error(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrTerminator {
     pub ty: IrTerminatorType,
     pub line: usize,
@@ -110,7 +113,7 @@ impl IrBlock {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IrPrimitiveType {
     Boolean,
     Natural,
@@ -129,7 +132,7 @@ impl IrPrimitiveType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IrVariableType {
     Primitive(IrPrimitiveType),
     Struct(Vec<IrVariableType>),
@@ -164,9 +167,9 @@ impl IrCompiler {
         }
     }
 
-    fn new_variable(&mut self, ty: &AstType) -> usize {
+    fn new_variable(&mut self, ty: IrVariableType) -> usize {
         let var = self.vars.len();
-        self.vars.push(Self::get_variable_type(ty));
+        self.vars.push(ty);
         var
     }
 
@@ -417,6 +420,16 @@ impl IrCompiler {
                     column + 1
                 )
             }
+            IrInstructionType::MinimumCapacity(temp)
+                if self.temps[temp] == IrPrimitiveType::Natural =>
+            {
+                IrPrimitiveType::Natural
+            }
+            IrInstructionType::MinimumCapacity(_) => panic!(
+                "can only calculate capacity for natural length {}:{}",
+                line + 1,
+                column + 1
+            ),
             IrInstructionType::Equals(a_temp, b_temp)
                 if matches!(
                     (&self.temps[a_temp], &self.temps[b_temp]),
@@ -464,10 +477,60 @@ impl IrCompiler {
                 line + 1,
                 column + 1
             ),
-            // TODO More here
             IrInstructionType::Variable(var) => {
                 IrPrimitiveType::Reference(Box::new(self.vars[var].clone()))
             }
+            // TODO More here
+            IrInstructionType::Count(temp)
+                if matches!(
+                    &self.temps[temp],
+                    IrPrimitiveType::Reference(ty)
+                        if matches!(ty.as_ref(), IrVariableType::Array(_))
+                ) =>
+            {
+                IrPrimitiveType::Reference(Box::new(IrVariableType::Primitive(
+                    IrPrimitiveType::Natural,
+                )))
+            }
+            IrInstructionType::Count(_) => {
+                panic!("can only take count of arrays {}:{}", line + 1, column + 1)
+            }
+            IrInstructionType::Capacity(temp)
+                if matches!(
+                    &self.temps[temp],
+                    IrPrimitiveType::Reference(ty)
+                        if matches!(ty.as_ref(), IrVariableType::Array(_))
+                ) =>
+            {
+                IrPrimitiveType::Reference(Box::new(IrVariableType::Primitive(
+                    IrPrimitiveType::Natural,
+                )))
+            }
+            IrInstructionType::Capacity(_) => panic!(
+                "can only take capacity of arrays {}:{}",
+                line + 1,
+                column + 1
+            ),
+            IrInstructionType::Index(arr_temp, index_temp)
+                if self.temps[index_temp] == IrPrimitiveType::Natural =>
+            {
+                match &self.temps[arr_temp] {
+                    IrPrimitiveType::Reference(ty) => match ty.as_ref() {
+                        IrVariableType::Array(ty) => IrPrimitiveType::Reference(ty.clone()),
+                        _ => panic!(
+                            "can only index array references {}:{}",
+                            line + 1,
+                            column + 1
+                        ),
+                    },
+                    _ => panic!("can only index references {}:{}", line + 1, column + 1),
+                }
+            }
+            IrInstructionType::Index(..) => panic!(
+                "can only index using natural numbers {}:{}",
+                line + 1,
+                column + 1
+            ),
             IrInstructionType::Assign(_) => panic!(
                 "cannot know what to assign to at {}:{}",
                 line + 1,
@@ -488,7 +551,12 @@ impl IrCompiler {
                     column + 1
                 ),
             },
-            // TODO More here
+            IrInstructionType::Resize(..) => {
+                panic!("cannot know what to resize at {}:{}", line + 1, column + 1)
+            }
+            IrInstructionType::Free => {
+                panic!("cannot know what to free at {}:{}", line + 1, column + 1)
+            }
             IrInstructionType::Write => {
                 panic!("cannot know what to write at {}:{}", line + 1, column + 1)
             }
@@ -538,7 +606,53 @@ impl IrCompiler {
             &AstExpressionType::Character(value) => {
                 self.add_instruction(IrInstructionType::Character(value), line, column)
             }
-            AstExpressionType::String(_) => todo!(),
+            AstExpressionType::String(string) => {
+                let arr_var = self.new_variable(IrVariableType::Array(Box::new(
+                    IrVariableType::Primitive(IrPrimitiveType::Character),
+                )));
+                let arr_temp =
+                    self.add_instruction(IrInstructionType::Variable(arr_var), line, column);
+                self.add_zero_initialization(arr_temp, line, column);
+                let len_temp = self.add_instruction(
+                    IrInstructionType::Natural(string.chars().count() as _),
+                    line,
+                    column,
+                );
+                let new_capacity_temp = self.add_instruction(
+                    IrInstructionType::MinimumCapacity(len_temp),
+                    line,
+                    column,
+                );
+                self.current_block().add_instruction(IrInstruction {
+                    temp: arr_temp,
+                    ty: IrInstructionType::Resize(new_capacity_temp),
+                    line,
+                    column,
+                });
+                let capacity_temp =
+                    self.add_instruction(IrInstructionType::Capacity(arr_temp), line, column);
+                self.add_assignment(capacity_temp, new_capacity_temp, line, column);
+                for (index, ch) in string.chars().enumerate() {
+                    let index_temp =
+                        self.add_instruction(IrInstructionType::Natural(index as _), line, column);
+                    let item_temp = self.add_instruction(
+                        IrInstructionType::Index(arr_temp, index_temp),
+                        line,
+                        column,
+                    );
+                    let char_temp =
+                        self.add_instruction(IrInstructionType::Character(ch), line, column);
+                    self.add_assignment(item_temp, char_temp, line, column);
+                }
+                let count_temp =
+                    self.add_instruction(IrInstructionType::Count(arr_temp), line, column);
+                self.add_assignment(count_temp, len_temp, line, column);
+                self.scope
+                    .last_mut()
+                    .expect("scope should not be empty")
+                    .insert(String::new(), arr_var);
+                arr_temp
+            }
             AstExpressionType::Noun(name) => {
                 let var = self.get_variable_for_name(name, line, column);
                 self.add_instruction(IrInstructionType::Variable(var), line, column)
@@ -617,6 +731,37 @@ impl IrCompiler {
                     }
                     BinaryOperator::Index => {
                         let b_temp = self.add_dereference(b_temp, line, column);
+                        let count_temp =
+                            self.add_instruction(IrInstructionType::Count(a_temp), line, column);
+                        let count_deref_temp = self.add_dereference(count_temp, line, column);
+                        let not_cond_temp = self.add_instruction(
+                            IrInstructionType::LessThan(b_temp, count_deref_temp),
+                            line,
+                            column,
+                        );
+                        let cond_temp = self.add_instruction(
+                            IrInstructionType::Not(not_cond_temp),
+                            line,
+                            column,
+                        );
+                        let then_block = self.new_block();
+                        let end_block = self.new_block();
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Conditional(cond_temp, then_block, end_block),
+                            line,
+                            column,
+                        });
+                        self.block = then_block;
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Error(format!(
+                                "out of bounds error at {}:{}",
+                                line + 1,
+                                column + 1
+                            )),
+                            line,
+                            column,
+                        });
+                        self.block = end_block;
                         self.add_instruction(IrInstructionType::Index(a_temp, b_temp), line, column)
                     }
                     BinaryOperator::And => {
@@ -653,6 +798,11 @@ impl IrCompiler {
                     let temp = self.compile_expression(&args[0]);
                     let temp = self.add_dereference(temp, line, column);
                     self.add_instruction(IrInstructionType::Not(temp), line, column)
+                }
+                "саны" => {
+                    let temp = self.compile_expression(&args[0]);
+                    let temp = self.add_instruction(IrInstructionType::Count(temp), line, column);
+                    self.add_dereference(temp, line, column)
                 }
                 "артық" => {
                     let a_temp = self.compile_expression(&args[0]);
@@ -696,8 +846,16 @@ impl IrCompiler {
             unreachable!("should only be called for references");
         };
         match ty.as_ref() {
-            IrVariableType::Primitive(_) => {
+            IrVariableType::Primitive(var_type) => {
+                let var_type = var_type.clone();
                 let val_temp = self.add_dereference(val_temp, line, column);
+                if var_type != self.temps[val_temp] {
+                    panic!(
+                        "incompatible types for assignment at {}:{}",
+                        line + 1,
+                        column + 1
+                    );
+                }
                 self.current_block().add_instruction(IrInstruction {
                     temp: var_temp,
                     ty: IrInstructionType::Assign(val_temp),
@@ -740,11 +898,12 @@ impl IrCompiler {
                     line,
                     column,
                 );
-                self.add_instruction(
-                    IrInstructionType::Resize(var_temp, val_capacity_deref_temp),
+                self.current_block().add_instruction(IrInstruction {
+                    temp: var_temp,
+                    ty: IrInstructionType::Resize(val_capacity_deref_temp),
                     line,
                     column,
-                );
+                });
                 let var_count_temp =
                     self.add_instruction(IrInstructionType::Count(var_temp), line, column);
                 let var_capacity_temp =
@@ -842,10 +1001,9 @@ impl IrCompiler {
                 }
             }
             IrVariableType::Array(_) => {
-                let null_temp = self.add_instruction(IrInstructionType::Null, line, column);
                 self.current_block().add_instruction(IrInstruction {
                     temp: var_temp,
-                    ty: IrInstructionType::Assign(null_temp),
+                    ty: IrInstructionType::Null,
                     line,
                     column,
                 });
@@ -921,7 +1079,12 @@ impl IrCompiler {
                     column,
                 });
                 self.block = end_block;
-                self.add_instruction(IrInstructionType::Free(var_temp), line, column);
+                self.current_block().add_instruction(IrInstruction {
+                    temp: var_temp,
+                    ty: IrInstructionType::Free,
+                    line,
+                    column,
+                });
             }
         }
     }
@@ -1015,7 +1178,7 @@ impl IrCompiler {
                 });
                 self.block = self.new_block();
             }
-            // TODO More here
+            AstStatementType::Constant(..) => todo!(),
             &AstStatementType::Variable(
                 ref expr,
                 ref ty,
@@ -1025,7 +1188,7 @@ impl IrCompiler {
                     column,
                 },
             ) => {
-                let var_var = self.new_variable(ty);
+                let var_var = self.new_variable(Self::get_variable_type(ty));
                 let var_temp =
                     self.add_instruction(IrInstructionType::Variable(var_var), line, column);
                 if let Some(expr) = expr {
@@ -1055,6 +1218,51 @@ impl IrCompiler {
                     column,
                 },
             ) => match (args.len(), name.as_str()) {
+                (1, "ал") => {
+                    let arr_temp = self.compile_expression(&args[0]);
+                    let count_temp =
+                        self.add_instruction(IrInstructionType::Count(arr_temp), line, column);
+                    let count_deref_temp = self.add_dereference(count_temp, line, column);
+                    let zero_temp =
+                        self.add_instruction(IrInstructionType::Natural(0), line, column);
+                    let cond_temp = self.add_instruction(
+                        IrInstructionType::GreaterThan(count_deref_temp, zero_temp),
+                        line,
+                        column,
+                    );
+                    let then_block = self.new_block();
+                    let else_block = self.new_block();
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Conditional(cond_temp, then_block, else_block),
+                        line,
+                        column,
+                    });
+                    self.block = then_block;
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Error(format!(
+                            "cannot pop from empty array at {}:{}",
+                            line + 1,
+                            column + 1
+                        )),
+                        line,
+                        column,
+                    });
+                    self.block = else_block;
+                    let one_temp =
+                        self.add_instruction(IrInstructionType::Natural(1), line, column);
+                    let new_count_temp = self.add_instruction(
+                        IrInstructionType::Subtract(count_deref_temp, one_temp),
+                        line,
+                        column,
+                    );
+                    let item_temp = self.add_instruction(
+                        IrInstructionType::Index(arr_temp, new_count_temp),
+                        line,
+                        column,
+                    );
+                    self.add_free(item_temp, line, column);
+                    self.add_assignment(count_temp, new_count_temp, line, column);
+                }
                 (1, "жаз") => {
                     let temp = self.compile_expression(&args[0]);
                     let temp = match &self.temps[temp] {
@@ -1065,12 +1273,75 @@ impl IrCompiler {
                         }
                         _ => temp,
                     };
-                    self.current_block().add_instruction(IrInstruction {
-                        temp,
-                        ty: IrInstructionType::Write,
-                        line,
-                        column,
-                    });
+                    if matches!(
+                        &self.temps[temp],
+                        IrPrimitiveType::Reference(ty)
+                            if matches!(
+                                ty.as_ref(),
+                                IrVariableType::Array(ty)
+                                    if *ty.as_ref()
+                                        == IrVariableType::Primitive(IrPrimitiveType::Character)
+                            )
+                    ) {
+                        let index_temp =
+                            self.add_instruction(IrInstructionType::Natural(0), line, column);
+                        let count_temp =
+                            self.add_instruction(IrInstructionType::Count(temp), line, column);
+                        let count_deref_temp = self.add_dereference(count_temp, line, column);
+                        let cond_block = self.new_block();
+                        let body_block = self.new_block();
+                        let end_block = self.new_block();
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Unconditional(cond_block),
+                            line,
+                            column,
+                        });
+                        self.block = cond_block;
+                        let cond_temp = self.add_instruction(
+                            IrInstructionType::LessThan(index_temp, count_deref_temp),
+                            line,
+                            column,
+                        );
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Conditional(cond_temp, body_block, end_block),
+                            line,
+                            column,
+                        });
+                        self.block = body_block;
+                        let char_temp = self.add_instruction(
+                            IrInstructionType::Index(temp, index_temp),
+                            line,
+                            column,
+                        );
+                        let char_deref_temp = self.add_dereference(char_temp, line, column);
+                        self.current_block().add_instruction(IrInstruction {
+                            temp: char_deref_temp,
+                            ty: IrInstructionType::Write,
+                            line,
+                            column,
+                        });
+                        let one_temp =
+                            self.add_instruction(IrInstructionType::Natural(1), line, column);
+                        self.current_block().add_instruction(IrInstruction {
+                            temp: index_temp,
+                            ty: IrInstructionType::Add(index_temp, one_temp),
+                            line,
+                            column,
+                        });
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Unconditional(cond_block),
+                            line,
+                            column,
+                        });
+                        self.block = end_block;
+                    } else {
+                        self.current_block().add_instruction(IrInstruction {
+                            temp,
+                            ty: IrInstructionType::Write,
+                            line,
+                            column,
+                        });
+                    }
                 }
                 (1, "оқы") => {
                     let temp = self.compile_expression(&args[0]);
@@ -1081,10 +1352,207 @@ impl IrCompiler {
                         column,
                     });
                 }
+                (2, "қос") => {
+                    let arr_temp = self.compile_expression(&args[0]);
+                    let val_temp = self.compile_expression(&args[1]);
+                    let count_temp =
+                        self.add_instruction(IrInstructionType::Count(arr_temp), line, column);
+                    let count_deref_temp = self.add_dereference(count_temp, line, column);
+                    let one_temp =
+                        self.add_instruction(IrInstructionType::Natural(1), line, column);
+                    let new_count_temp = self.add_instruction(
+                        IrInstructionType::Add(count_deref_temp, one_temp),
+                        line,
+                        column,
+                    );
+                    let capacity_temp =
+                        self.add_instruction(IrInstructionType::Capacity(arr_temp), line, column);
+                    let capacity_deref_temp = self.add_dereference(capacity_temp, line, column);
+                    let new_capacity_temp = self.add_instruction(
+                        IrInstructionType::MinimumCapacity(new_count_temp),
+                        line,
+                        column,
+                    );
+                    let cond_temp = self.add_instruction(
+                        IrInstructionType::LessThan(capacity_deref_temp, new_capacity_temp),
+                        line,
+                        column,
+                    );
+                    let then_block = self.new_block();
+                    let end_block = self.new_block();
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Conditional(cond_temp, then_block, end_block),
+                        line,
+                        column,
+                    });
+                    self.block = then_block;
+                    self.current_block().add_instruction(IrInstruction {
+                        temp: arr_temp,
+                        ty: IrInstructionType::Resize(new_capacity_temp),
+                        line,
+                        column,
+                    });
+                    self.add_assignment(capacity_temp, new_capacity_temp, line, column);
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Unconditional(end_block),
+                        line,
+                        column,
+                    });
+                    self.block = end_block;
+                    let item_temp = self.add_instruction(
+                        IrInstructionType::Index(arr_temp, count_deref_temp),
+                        line,
+                        column,
+                    );
+                    self.add_zero_initialization(item_temp, line, column);
+                    self.add_assignment(item_temp, val_temp, line, column);
+                    self.add_assignment(count_temp, new_count_temp, line, column);
+                }
                 (2, "орнат") => {
                     let var_temp = self.compile_expression(&args[0]);
                     let val_temp = self.compile_expression(&args[1]);
                     self.add_assignment(var_temp, val_temp, line, column);
+                }
+                (2, "санынОрнат") => {
+                    let arr_temp = self.compile_expression(&args[0]);
+                    let new_count_temp = self.compile_expression(&args[1]);
+                    let count_temp =
+                        self.add_instruction(IrInstructionType::Count(arr_temp), line, column);
+                    let count_deref_temp = self.add_dereference(count_temp, line, column);
+                    let cond_temp = self.add_instruction(
+                        IrInstructionType::LessThan(count_deref_temp, new_count_temp),
+                        line,
+                        column,
+                    );
+                    let then_block = self.new_block();
+                    let else_block = self.new_block();
+                    let end_block = self.new_block();
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Conditional(cond_temp, then_block, else_block),
+                        line,
+                        column,
+                    });
+                    self.block = then_block;
+                    let capacity_temp =
+                        self.add_instruction(IrInstructionType::Capacity(arr_temp), line, column);
+                    let capacity_deref_temp = self.add_dereference(capacity_temp, line, column);
+                    let new_capacity_temp = self.add_instruction(
+                        IrInstructionType::MinimumCapacity(new_count_temp),
+                        line,
+                        column,
+                    );
+                    let cond_temp = self.add_instruction(
+                        IrInstructionType::LessThan(capacity_deref_temp, new_capacity_temp),
+                        line,
+                        column,
+                    );
+                    let then_then_block = self.new_block();
+                    let then_end_block = self.new_block();
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Conditional(
+                            cond_temp,
+                            then_then_block,
+                            then_end_block,
+                        ),
+                        line,
+                        column,
+                    });
+                    self.block = then_then_block;
+                    self.current_block().add_instruction(IrInstruction {
+                        temp: arr_temp,
+                        ty: IrInstructionType::Resize(new_capacity_temp),
+                        line,
+                        column,
+                    });
+                    self.add_assignment(capacity_temp, new_capacity_temp, line, column);
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Unconditional(then_end_block),
+                        line,
+                        column,
+                    });
+                    self.block = then_end_block;
+                    let then_cond_block = self.new_block();
+                    let then_body_block = self.new_block();
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Unconditional(then_cond_block),
+                        line,
+                        column,
+                    });
+                    self.block = then_cond_block;
+                    let cond_temp = self.add_instruction(
+                        IrInstructionType::LessThan(count_deref_temp, new_count_temp),
+                        line,
+                        column,
+                    );
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Conditional(cond_temp, then_body_block, end_block),
+                        line,
+                        column,
+                    });
+                    self.block = then_body_block;
+                    let item_temp = self.add_instruction(
+                        IrInstructionType::Index(arr_temp, count_deref_temp),
+                        line,
+                        column,
+                    );
+                    self.add_zero_initialization(item_temp, line, column);
+                    let one_temp =
+                        self.add_instruction(IrInstructionType::Natural(1), line, column);
+                    self.current_block().add_instruction(IrInstruction {
+                        temp: count_deref_temp,
+                        ty: IrInstructionType::Add(count_deref_temp, one_temp),
+                        line,
+                        column,
+                    });
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Unconditional(then_cond_block),
+                        line,
+                        column,
+                    });
+                    self.block = else_block;
+                    let cond_temp = self.add_instruction(
+                        IrInstructionType::GreaterThan(count_deref_temp, new_count_temp),
+                        line,
+                        column,
+                    );
+                    let else_body_block = self.new_block();
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Conditional(cond_temp, else_body_block, end_block),
+                        line,
+                        column,
+                    });
+                    self.block = else_body_block;
+                    let whole_count_temp = self.add_instruction(
+                        IrInstructionType::ToWhole(count_deref_temp),
+                        line,
+                        column,
+                    );
+                    let whole_one_temp =
+                        self.add_instruction(IrInstructionType::Whole(1), line, column);
+                    let next_whole_count_temp = self.add_instruction(
+                        IrInstructionType::Subtract(whole_count_temp, whole_one_temp),
+                        line,
+                        column,
+                    );
+                    self.current_block().add_instruction(IrInstruction {
+                        temp: count_deref_temp,
+                        ty: IrInstructionType::ToNatural(next_whole_count_temp),
+                        line,
+                        column,
+                    });
+                    let item_temp = self.add_instruction(
+                        IrInstructionType::Index(arr_temp, count_deref_temp),
+                        line,
+                        column,
+                    );
+                    self.add_free(item_temp, line, column);
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Unconditional(else_block),
+                        line,
+                        column,
+                    });
+                    self.block = end_block;
+                    self.add_assignment(count_temp, new_count_temp, line, column);
                 }
                 _ => todo!(),
             },
@@ -1098,7 +1566,7 @@ impl IrCompiler {
                 break;
             }
             reachable[block] = true;
-            let IrBlock::Terminated(_, term) = self.blocks[block] else {
+            let IrBlock::Terminated(_, term) = &self.blocks[block] else {
                 panic!("not all blocks are terminated");
             };
             match term.ty {
@@ -1107,7 +1575,7 @@ impl IrCompiler {
                     self.mark_reachable(reachable, then_block);
                     block = else_block
                 }
-                IrTerminatorType::Return(_) => break,
+                _ => break,
             }
         }
     }

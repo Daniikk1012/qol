@@ -2,14 +2,59 @@ use crate::compiler::{
     IrFunction, IrInstruction, IrInstructionType, IrPrimitiveType, IrTerminatorType, IrVariableType,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+enum ReferenceValue {
+    Variable(usize),
+    Index(Box<ReferenceValue>, usize),
+    Count(Box<ReferenceValue>),
+    Capacity(Box<ReferenceValue>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum PrimitiveValue {
     Boolean(bool),
     Natural(u64),
     Whole(i64),
     Real(f64),
     Character(char),
-    Reference(usize),
+    Reference(ReferenceValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum VariableValue {
+    Primitive(PrimitiveValue),
+    Array {
+        data: Vec<VariableValue>,
+        count: Box<VariableValue>,
+        capacity: Box<VariableValue>,
+    },
+}
+
+fn dereference<'a>(
+    vars: &'a mut [VariableValue],
+    reference: &ReferenceValue,
+) -> &'a mut VariableValue {
+    match reference {
+        &ReferenceValue::Variable(index) => &mut vars[index],
+        &ReferenceValue::Index(ref reference, index) => {
+            let VariableValue::Array { data, .. } = dereference(vars, reference) else {
+                unreachable!();
+            };
+            &mut data[index]
+        }
+        ReferenceValue::Count(reference) => {
+            let VariableValue::Array { count, .. } = dereference(vars, reference) else {
+                unreachable!();
+            };
+            count
+        }
+        ReferenceValue::Capacity(reference) => {
+            let VariableValue::Array { capacity, .. } = dereference(vars, reference) else {
+                unreachable!();
+            };
+            capacity
+        }
+    }
 }
 
 pub fn run(
@@ -24,13 +69,26 @@ pub fn run(
     let mut vars: Vec<_> = vars
         .iter()
         .map(|ty| match ty {
-            IrVariableType::Primitive(IrPrimitiveType::Boolean) => PrimitiveValue::Boolean(false),
-            IrVariableType::Primitive(IrPrimitiveType::Natural) => PrimitiveValue::Natural(0),
-            IrVariableType::Primitive(IrPrimitiveType::Whole) => PrimitiveValue::Whole(0),
-            IrVariableType::Primitive(IrPrimitiveType::Real) => PrimitiveValue::Real(0.0),
-            IrVariableType::Primitive(IrPrimitiveType::Character) => {
-                PrimitiveValue::Character('\0')
+            IrVariableType::Primitive(IrPrimitiveType::Boolean) => {
+                VariableValue::Primitive(PrimitiveValue::Boolean(false))
             }
+            IrVariableType::Primitive(IrPrimitiveType::Natural) => {
+                VariableValue::Primitive(PrimitiveValue::Natural(0))
+            }
+            IrVariableType::Primitive(IrPrimitiveType::Whole) => {
+                VariableValue::Primitive(PrimitiveValue::Whole(0))
+            }
+            IrVariableType::Primitive(IrPrimitiveType::Real) => {
+                VariableValue::Primitive(PrimitiveValue::Real(0.0))
+            }
+            IrVariableType::Primitive(IrPrimitiveType::Character) => {
+                VariableValue::Primitive(PrimitiveValue::Character('\0'))
+            }
+            IrVariableType::Array(_) => VariableValue::Array {
+                data: Vec::new(),
+                count: Box::new(VariableValue::Primitive(PrimitiveValue::Natural(0))),
+                capacity: Box::new(VariableValue::Primitive(PrimitiveValue::Natural(0))),
+            },
             _ => unreachable!(),
         })
         .collect();
@@ -42,7 +100,7 @@ pub fn run(
             IrPrimitiveType::Whole => PrimitiveValue::Whole(0),
             IrPrimitiveType::Real => PrimitiveValue::Real(0.0),
             IrPrimitiveType::Character => PrimitiveValue::Character('\0'),
-            IrPrimitiveType::Reference(_) => PrimitiveValue::Reference(0),
+            IrPrimitiveType::Reference(_) => PrimitiveValue::Reference(ReferenceValue::Variable(0)),
         })
         .collect();
     let mut input_words = Vec::new();
@@ -63,6 +121,10 @@ pub fn run(
                     inst = 0;
                 }
                 IrTerminatorType::Return(_) => break,
+                IrTerminatorType::Error(ref string) => {
+                    eprintln!("finished with error: {string}");
+                    break;
+                }
             }
             continue;
         }
@@ -73,7 +135,16 @@ pub fn run(
             IrInstructionType::Whole(value) => temps[temp] = PrimitiveValue::Whole(value),
             IrInstructionType::Real(value) => temps[temp] = PrimitiveValue::Real(value),
             IrInstructionType::Character(value) => temps[temp] = PrimitiveValue::Character(value),
-            IrInstructionType::Null => todo!(),
+            IrInstructionType::Null => {
+                let PrimitiveValue::Reference(reference) = &temps[temp] else {
+                    unreachable!();
+                };
+                *dereference(&mut vars, reference) = VariableValue::Array {
+                    data: Vec::new(),
+                    count: Box::new(VariableValue::Primitive(PrimitiveValue::Natural(0))),
+                    capacity: Box::new(VariableValue::Primitive(PrimitiveValue::Natural(0))),
+                };
+            }
             IrInstructionType::ToNatural(val_temp) => {
                 temps[temp] = PrimitiveValue::Natural(match temps[val_temp] {
                     PrimitiveValue::Natural(value) => value,
@@ -107,8 +178,8 @@ pub fn run(
             }
             IrInstructionType::And(a_temp, b_temp) => {
                 temps[temp] = PrimitiveValue::Boolean(
-                    if let (PrimitiveValue::Boolean(a), PrimitiveValue::Boolean(b)) =
-                        (temps[a_temp], temps[b_temp])
+                    if let (&PrimitiveValue::Boolean(a), &PrimitiveValue::Boolean(b)) =
+                        (&temps[a_temp], &temps[b_temp])
                     {
                         a && b
                     } else {
@@ -118,8 +189,8 @@ pub fn run(
             }
             IrInstructionType::Or(a_temp, b_temp) => {
                 temps[temp] = PrimitiveValue::Boolean(
-                    if let (PrimitiveValue::Boolean(a), PrimitiveValue::Boolean(b)) =
-                        (temps[a_temp], temps[b_temp])
+                    if let (&PrimitiveValue::Boolean(a), &PrimitiveValue::Boolean(b)) =
+                        (&temps[a_temp], &temps[b_temp])
                     {
                         a || b
                     } else {
@@ -137,7 +208,7 @@ pub fn run(
                 )
             }
             IrInstructionType::Add(a_temp, b_temp) => {
-                temps[temp] = match (temps[a_temp], temps[b_temp]) {
+                temps[temp] = match (&temps[a_temp], &temps[b_temp]) {
                     (PrimitiveValue::Natural(b), PrimitiveValue::Natural(a)) => {
                         PrimitiveValue::Natural(a + b)
                     }
@@ -151,7 +222,7 @@ pub fn run(
                 }
             }
             IrInstructionType::Subtract(a_temp, b_temp) => {
-                temps[temp] = match (temps[a_temp], temps[b_temp]) {
+                temps[temp] = match (&temps[a_temp], &temps[b_temp]) {
                     (PrimitiveValue::Whole(b), PrimitiveValue::Whole(a)) => {
                         PrimitiveValue::Whole(a - b)
                     }
@@ -162,7 +233,7 @@ pub fn run(
                 }
             }
             IrInstructionType::Multiply(a_temp, b_temp) => {
-                temps[temp] = match (temps[a_temp], temps[b_temp]) {
+                temps[temp] = match (&temps[a_temp], &temps[b_temp]) {
                     (PrimitiveValue::Natural(b), PrimitiveValue::Natural(a)) => {
                         PrimitiveValue::Natural(a * b)
                     }
@@ -176,7 +247,7 @@ pub fn run(
                 }
             }
             IrInstructionType::Divide(a_temp, b_temp) => {
-                temps[temp] = match (temps[a_temp], temps[b_temp]) {
+                temps[temp] = match (&temps[a_temp], &temps[b_temp]) {
                     (PrimitiveValue::Real(b), PrimitiveValue::Real(a)) => {
                         PrimitiveValue::Real(a / b)
                     }
@@ -184,7 +255,7 @@ pub fn run(
                 }
             }
             IrInstructionType::Remainder(a_temp, b_temp) => {
-                temps[temp] = match (temps[a_temp], temps[b_temp]) {
+                temps[temp] = match (&temps[a_temp], &temps[b_temp]) {
                     (PrimitiveValue::Natural(b), PrimitiveValue::Natural(a)) => {
                         PrimitiveValue::Natural(a % b)
                     }
@@ -204,11 +275,17 @@ pub fn run(
                     _ => unreachable!(),
                 }
             }
+            IrInstructionType::MinimumCapacity(val_temp) => {
+                let PrimitiveValue::Natural(value) = temps[val_temp] else {
+                    unreachable!();
+                };
+                temps[temp] = PrimitiveValue::Natural((value + 1).next_power_of_two() - 1);
+            }
             IrInstructionType::Equals(a_temp, b_temp) => {
                 temps[temp] = PrimitiveValue::Boolean(temps[a_temp] == temps[b_temp])
             }
             IrInstructionType::LessThan(a_temp, b_temp) => {
-                temps[temp] = PrimitiveValue::Boolean(match (temps[a_temp], temps[b_temp]) {
+                temps[temp] = PrimitiveValue::Boolean(match (&temps[a_temp], &temps[b_temp]) {
                     (PrimitiveValue::Natural(a), PrimitiveValue::Natural(b)) => a < b,
                     (PrimitiveValue::Whole(a), PrimitiveValue::Whole(b)) => a < b,
                     (PrimitiveValue::Real(a), PrimitiveValue::Real(b)) => a < b,
@@ -216,34 +293,76 @@ pub fn run(
                 })
             }
             IrInstructionType::GreaterThan(a_temp, b_temp) => {
-                temps[temp] = PrimitiveValue::Boolean(match (temps[a_temp], temps[b_temp]) {
+                temps[temp] = PrimitiveValue::Boolean(match (&temps[a_temp], &temps[b_temp]) {
                     (PrimitiveValue::Natural(a), PrimitiveValue::Natural(b)) => a > b,
                     (PrimitiveValue::Whole(a), PrimitiveValue::Whole(b)) => a > b,
                     (PrimitiveValue::Real(a), PrimitiveValue::Real(b)) => a > b,
                     _ => unreachable!(),
                 })
             }
-            IrInstructionType::Variable(var) => temps[temp] = PrimitiveValue::Reference(var),
+            IrInstructionType::Variable(var) => {
+                temps[temp] = PrimitiveValue::Reference(ReferenceValue::Variable(var))
+            }
             IrInstructionType::Field(..) => todo!(),
-            IrInstructionType::Count(_) => todo!(),
-            IrInstructionType::Capacity(_) => todo!(),
-            IrInstructionType::Index(..) => todo!(),
+            IrInstructionType::Count(val_temp) => {
+                let PrimitiveValue::Reference(reference) = &temps[val_temp] else {
+                    unreachable!();
+                };
+                temps[temp] =
+                    PrimitiveValue::Reference(ReferenceValue::Count(Box::new(reference.clone())));
+            }
+            IrInstructionType::Capacity(val_temp) => {
+                let PrimitiveValue::Reference(reference) = &temps[val_temp] else {
+                    unreachable!();
+                };
+                temps[temp] = PrimitiveValue::Reference(ReferenceValue::Capacity(Box::new(
+                    reference.clone(),
+                )));
+            }
+            IrInstructionType::Index(arr_temp, index_temp) => {
+                let PrimitiveValue::Reference(reference) = &temps[arr_temp] else {
+                    unreachable!();
+                };
+                let PrimitiveValue::Natural(index) = temps[index_temp] else {
+                    unreachable!();
+                };
+                temps[temp] = PrimitiveValue::Reference(ReferenceValue::Index(
+                    Box::new(reference.clone()),
+                    index as _,
+                ));
+            }
             IrInstructionType::Assign(val_temp) => {
-                vars[if let PrimitiveValue::Reference(var) = temps[temp] {
-                    var
-                } else {
-                    unreachable!()
-                }] = temps[val_temp]
+                let PrimitiveValue::Reference(reference) = &temps[temp] else {
+                    unreachable!();
+                };
+                *dereference(&mut vars, reference) =
+                    VariableValue::Primitive(temps[val_temp].clone());
             }
             IrInstructionType::Dereference(val_temp) => {
-                temps[temp] = vars[if let PrimitiveValue::Reference(var) = temps[val_temp] {
-                    var
-                } else {
-                    unreachable!()
-                }]
+                let PrimitiveValue::Reference(reference) = &temps[val_temp] else {
+                    unreachable!();
+                };
+                let VariableValue::Primitive(primitive) = dereference(&mut vars, reference) else {
+                    unreachable!();
+                };
+                temps[temp] = primitive.clone();
             }
-            IrInstructionType::Resize(..) => todo!(),
-            IrInstructionType::Free(_) => todo!(),
+            IrInstructionType::Resize(val_temp) => {
+                let PrimitiveValue::Reference(reference) = &temps[temp] else {
+                    unreachable!();
+                };
+                let VariableValue::Array { data, .. } = dereference(&mut vars, reference) else {
+                    unreachable!();
+                };
+                let PrimitiveValue::Natural(size) = temps[val_temp] else {
+                    unreachable!();
+                };
+                data.resize(
+                    size as _,
+                    VariableValue::Primitive(PrimitiveValue::Boolean(false)),
+                );
+            }
+            IrInstructionType::Free => {}
             IrInstructionType::Write => match temps[temp] {
                 PrimitiveValue::Boolean(value) => {
                     if value {
@@ -259,12 +378,11 @@ pub fn run(
                 _ => unreachable!(),
             },
             IrInstructionType::Read => {
-                match &mut vars[if let PrimitiveValue::Reference(var) = temps[temp] {
-                    var
-                } else {
-                    unreachable!()
-                }] {
-                    PrimitiveValue::Natural(value) => {
+                let PrimitiveValue::Reference(reference) = &temps[temp] else {
+                    unreachable!();
+                };
+                match dereference(&mut vars, reference) {
+                    VariableValue::Primitive(PrimitiveValue::Natural(value)) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
                                 input_words =
@@ -281,7 +399,7 @@ pub fn run(
                             });
                         }
                     }
-                    PrimitiveValue::Whole(value) => {
+                    VariableValue::Primitive(PrimitiveValue::Whole(value)) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
                                 input_words =
@@ -298,7 +416,7 @@ pub fn run(
                             });
                         }
                     }
-                    PrimitiveValue::Real(value) => {
+                    VariableValue::Primitive(PrimitiveValue::Real(value)) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
                                 input_words =
@@ -315,7 +433,7 @@ pub fn run(
                             });
                         }
                     }
-                    PrimitiveValue::Character(value) => {
+                    VariableValue::Primitive(PrimitiveValue::Character(value)) => {
                         *value = loop {
                             let Some(mut word) = input_words.pop() else {
                                 input_words =
