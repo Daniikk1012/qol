@@ -15,7 +15,8 @@ export function output(s) {
   outputElement.innerHTML += escapeHtml(s);
 }
 
-export function input() {
+export async function input() {
+  await new Promise(res => setTimeout(res, 1000));
   const line = prompt('Enter a line of input:');
   outputElement.innerHTML += escapeHtml(line + '\n');
   return line;

@@ -1,3 +1,4 @@
+use futures::executor;
 use std::{
     fs,
     io::{self, Write},
@@ -33,28 +34,31 @@ pub fn run(filename: &str) {
         ))
         .parse(),
     );
-    interpreter::run(
+    executor::block_on(interpreter::run(
         function,
         |s| print!("{s}"),
-        || {
+        || async {
             io::stdout().flush().expect("IO error");
             let mut line = String::new();
             io::stdin().read_line(&mut line).expect("IO error");
             line
         },
-    );
+    ));
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(module = "/web/io.mjs")]
 extern "C" {
-    pub fn output(s: &str);
-    pub fn input() -> String;
+    fn output(s: &str);
+    async fn input() -> JsValue;
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub fn wasm_run(code: &str) {
+pub async fn wasm_run(code: &str) {
     let function = IrCompiler::new().compile(&Parser::new(lexer::tokenize(code)).parse());
-    interpreter::run(function, output, input);
+    interpreter::run(function, output, || async {
+        input().await.as_string().unwrap()
+    })
+    .await;
 }

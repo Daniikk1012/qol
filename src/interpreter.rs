@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use crate::compiler::{
     IrFunction, IrInstruction, IrInstructionType, IrPrimitiveType, IrTerminatorType, IrVariableType,
 };
@@ -57,14 +59,14 @@ fn dereference<'a>(
     }
 }
 
-pub fn run(
+pub async fn run<F: Future<Output = String>>(
     IrFunction {
         vars,
         temps,
         blocks,
     }: IrFunction,
     output: impl Fn(&str),
-    input: impl Fn() -> String,
+    input: impl Fn() -> F,
 ) {
     let mut vars: Vec<_> = vars
         .iter()
@@ -385,8 +387,11 @@ pub fn run(
                     VariableValue::Primitive(PrimitiveValue::Natural(value)) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
-                                input_words =
-                                    input().split_whitespace().map(ToOwned::to_owned).collect();
+                                input_words = input()
+                                    .await
+                                    .split_whitespace()
+                                    .map(ToOwned::to_owned)
+                                    .collect();
                                 input_words.reverse();
                                 continue;
                             };
@@ -402,8 +407,11 @@ pub fn run(
                     VariableValue::Primitive(PrimitiveValue::Whole(value)) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
-                                input_words =
-                                    input().split_whitespace().map(ToOwned::to_owned).collect();
+                                input_words = input()
+                                    .await
+                                    .split_whitespace()
+                                    .map(ToOwned::to_owned)
+                                    .collect();
                                 input_words.reverse();
                                 continue;
                             };
@@ -419,8 +427,11 @@ pub fn run(
                     VariableValue::Primitive(PrimitiveValue::Real(value)) => {
                         *value = loop {
                             let Some(word) = input_words.pop() else {
-                                input_words =
-                                    input().split_whitespace().map(ToOwned::to_owned).collect();
+                                input_words = input()
+                                    .await
+                                    .split_whitespace()
+                                    .map(ToOwned::to_owned)
+                                    .collect();
                                 input_words.reverse();
                                 continue;
                             };
@@ -436,8 +447,11 @@ pub fn run(
                     VariableValue::Primitive(PrimitiveValue::Character(value)) => {
                         *value = loop {
                             let Some(mut word) = input_words.pop() else {
-                                input_words =
-                                    input().split_whitespace().map(ToOwned::to_owned).collect();
+                                input_words = input()
+                                    .await
+                                    .split_whitespace()
+                                    .map(ToOwned::to_owned)
+                                    .collect();
                                 input_words.reverse();
                                 continue;
                             };
