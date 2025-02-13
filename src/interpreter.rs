@@ -365,85 +365,85 @@ pub async fn run<F: Future<Output = String>>(
                 );
             }
             IrInstructionType::Free => {}
-            IrInstructionType::Write => match temps[temp] {
-                PrimitiveValue::Boolean(value) => {
-                    if value {
-                        output("Ақиқат\n");
-                    } else {
-                        output("Жалған\n");
+            IrInstructionType::Write(val_temp) => {
+                match temps[val_temp] {
+                    PrimitiveValue::Boolean(value) => {
+                        if value {
+                            output("Ақиқат\n");
+                        } else {
+                            output("Жалған\n");
+                        }
                     }
-                }
-                PrimitiveValue::Natural(value) => output(&format!("{value}\n")),
-                PrimitiveValue::Whole(value) => output(&format!("{value}\n")),
-                PrimitiveValue::Real(value) => output(&format!("{value}\n")),
-                PrimitiveValue::Character(value) => output(&format!("{value}")),
-                _ => unreachable!(),
-            },
-            IrInstructionType::Read => {
-                let PrimitiveValue::Reference(reference) = &temps[temp] else {
+                    PrimitiveValue::Natural(value) => output(&format!("{value}\n")),
+                    PrimitiveValue::Whole(value) => output(&format!("{value}\n")),
+                    PrimitiveValue::Real(value) => output(&format!("{value}\n")),
+                    PrimitiveValue::Character(value) => output(&format!("{value}")),
+                    _ => unreachable!(),
+                };
+                temps[temp] = PrimitiveValue::Boolean(true);
+            }
+            IrInstructionType::Read(val_temp) => {
+                let PrimitiveValue::Reference(reference) = &temps[val_temp] else {
                     unreachable!();
                 };
                 match dereference(&mut vars, reference) {
-                    VariableValue::Primitive(PrimitiveValue::Natural(value)) => {
-                        *value = loop {
-                            let Some(word) = input_words.pop() else {
-                                input_words = input()
-                                    .await
-                                    .split_whitespace()
-                                    .map(ToOwned::to_owned)
-                                    .collect();
-                                input_words.reverse();
-                                continue;
-                            };
-                            break word.parse().unwrap_or_else(|_| {
-                                panic!(
-                                    "invalid input at {}:{}",
-                                    blocks[block].as_ref().unwrap().insts[inst].line + 1,
-                                    blocks[block].as_ref().unwrap().insts[inst].column + 1
-                                )
-                            });
+                    VariableValue::Primitive(PrimitiveValue::Natural(value)) => loop {
+                        let Some(word) = input_words.pop() else {
+                            input_words = input()
+                                .await
+                                .split_whitespace()
+                                .map(ToOwned::to_owned)
+                                .collect();
+                            input_words.reverse();
+                            continue;
+                        };
+                        if let Ok(result) = word.parse() {
+                            *value = result;
+                            temps[temp] = PrimitiveValue::Boolean(true);
+                        } else {
+                            *value = 0;
+                            temps[temp] = PrimitiveValue::Boolean(false);
                         }
-                    }
-                    VariableValue::Primitive(PrimitiveValue::Whole(value)) => {
-                        *value = loop {
-                            let Some(word) = input_words.pop() else {
-                                input_words = input()
-                                    .await
-                                    .split_whitespace()
-                                    .map(ToOwned::to_owned)
-                                    .collect();
-                                input_words.reverse();
-                                continue;
-                            };
-                            break word.parse().unwrap_or_else(|_| {
-                                panic!(
-                                    "invalid input at {}:{}",
-                                    blocks[block].as_ref().unwrap().insts[inst].line + 1,
-                                    blocks[block].as_ref().unwrap().insts[inst].column + 1
-                                )
-                            });
+                        break;
+                    },
+                    VariableValue::Primitive(PrimitiveValue::Whole(value)) => loop {
+                        let Some(word) = input_words.pop() else {
+                            input_words = input()
+                                .await
+                                .split_whitespace()
+                                .map(ToOwned::to_owned)
+                                .collect();
+                            input_words.reverse();
+                            continue;
+                        };
+                        if let Ok(result) = word.parse() {
+                            *value = result;
+                            temps[temp] = PrimitiveValue::Boolean(true);
+                        } else {
+                            *value = 0;
+                            temps[temp] = PrimitiveValue::Boolean(false);
                         }
-                    }
-                    VariableValue::Primitive(PrimitiveValue::Real(value)) => {
-                        *value = loop {
-                            let Some(word) = input_words.pop() else {
-                                input_words = input()
-                                    .await
-                                    .split_whitespace()
-                                    .map(ToOwned::to_owned)
-                                    .collect();
-                                input_words.reverse();
-                                continue;
-                            };
-                            break word.parse().unwrap_or_else(|_| {
-                                panic!(
-                                    "invalid input at {}:{}",
-                                    blocks[block].as_ref().unwrap().insts[inst].line + 1,
-                                    blocks[block].as_ref().unwrap().insts[inst].column + 1
-                                )
-                            });
+                        break;
+                    },
+                    VariableValue::Primitive(PrimitiveValue::Real(value)) => loop {
+                        let Some(word) = input_words.pop() else {
+                            input_words = input()
+                                .await
+                                .split_whitespace()
+                                .map(ToOwned::to_owned)
+                                .collect();
+                            input_words.reverse();
+                            continue;
+                        };
+                        if let Ok(result) = word.parse() {
+                            *value = result;
+                            temps[temp] = PrimitiveValue::Boolean(true);
+                        } else {
+                            *value = 0.0;
+                            temps[temp] = PrimitiveValue::Boolean(false);
                         }
-                    }
+                        break;
+                    },
                     VariableValue::Primitive(PrimitiveValue::Character(value)) => {
                         *value = loop {
                             let Some(mut word) = input_words.pop() else {

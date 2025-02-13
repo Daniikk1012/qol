@@ -732,7 +732,9 @@ pub fn compile(function: IrFunction) {
                         ),
                     );
                 }
-                IrInstructionType::Write if function.temps[temp] == IrPrimitiveType::Boolean => {
+                IrInstructionType::Write(val_temp)
+                    if function.temps[val_temp] == IrPrimitiveType::Boolean =>
+                {
                     let gccjit_then_block =
                         gccjit_function.new_block(format!("block_{block_index}_then"));
                     let gccjit_else_block =
@@ -741,88 +743,116 @@ pub fn compile(function: IrFunction) {
                         gccjit_function.new_block(format!("block_{block_index}_end"));
                     gccjit_block.end_with_conditional(
                         loc,
-                        gccjit_temps[temp],
+                        gccjit_temps[val_temp],
                         gccjit_then_block,
                         gccjit_else_block,
                     );
-                    gccjit_then_block.add_eval(
+                    gccjit_then_block.add_assignment(
                         loc,
-                        context.new_call(
+                        gccjit_temps[temp],
+                        context.new_comparison(
                             loc,
-                            context.get_builtin_function("__builtin_puts"),
-                            &[context.new_string_literal("Ақиқат")],
+                            ComparisonOp::GreaterThanEquals,
+                            context.new_call(
+                                loc,
+                                context.get_builtin_function("__builtin_puts"),
+                                &[context.new_string_literal("Ақиқат")],
+                            ),
+                            context.new_rvalue_zero(gccjit_int),
                         ),
                     );
                     gccjit_then_block.end_with_jump(loc, gccjit_end_block);
-                    gccjit_else_block.add_eval(
+                    gccjit_else_block.add_assignment(
                         loc,
-                        context.new_call(
+                        gccjit_temps[temp],
+                        context.new_comparison(
                             loc,
-                            context.get_builtin_function("__builtin_puts"),
-                            &[context.new_string_literal("Жалған\n")],
+                            ComparisonOp::GreaterThanEquals,
+                            context.new_call(
+                                loc,
+                                context.get_builtin_function("__builtin_puts"),
+                                &[context.new_string_literal("Жалған\n")],
+                            ),
+                            context.new_rvalue_zero(gccjit_int),
                         ),
                     );
                     gccjit_else_block.end_with_jump(loc, gccjit_end_block);
                     gccjit_block = gccjit_end_block;
                 }
-                IrInstructionType::Write => {
-                    gccjit_block.add_eval(
+                IrInstructionType::Write(val_temp) => {
+                    gccjit_block.add_assignment(
                         loc,
-                        context.new_call(
+                        gccjit_temps[temp],
+                        context.new_comparison(
                             loc,
-                            context.get_builtin_function("__builtin_printf"),
-                            &[
-                                context.new_string_literal(match function.temps[temp] {
-                                    IrPrimitiveType::Natural => "%llu\n",
-                                    IrPrimitiveType::Whole => "%lld\n",
-                                    IrPrimitiveType::Real => "%f\n",
-                                    // TODO UTF-8
-                                    IrPrimitiveType::Character => "%c",
-                                    _ => unreachable!(),
-                                }),
-                                gccjit_temps[temp].to_rvalue(),
-                            ],
+                            ComparisonOp::GreaterThanEquals,
+                            context.new_call(
+                                loc,
+                                context.get_builtin_function("__builtin_printf"),
+                                &[
+                                    context.new_string_literal(match function.temps[val_temp] {
+                                        IrPrimitiveType::Natural => "%llu\n",
+                                        IrPrimitiveType::Whole => "%lld\n",
+                                        IrPrimitiveType::Real => "%f\n",
+                                        // TODO UTF-8
+                                        IrPrimitiveType::Character => "%c",
+                                        _ => unreachable!(),
+                                    }),
+                                    gccjit_temps[val_temp].to_rvalue(),
+                                ],
+                            ),
+                            context.new_rvalue_zero(gccjit_int),
                         ),
                     );
                 }
-                IrInstructionType::Read => {
-                    let IrPrimitiveType::Reference(ty) = &function.temps[temp] else {
+                IrInstructionType::Read(val_temp) => {
+                    let IrPrimitiveType::Reference(ty) = &function.temps[val_temp] else {
                         unreachable!();
                     };
-                    gccjit_block.add_eval(
+                    gccjit_block.add_assignment(
                         loc,
-                        context.new_call(
+                        gccjit_temps[temp],
+                        context.new_comparison(
                             loc,
-                            context.get_builtin_function("__builtin_scanf"),
-                            &[
-                                context.new_string_literal(match ty.as_ref() {
-                                    IrVariableType::Primitive(IrPrimitiveType::Natural) => "%llu",
-                                    IrVariableType::Primitive(IrPrimitiveType::Whole) => "%lld",
-                                    IrVariableType::Primitive(IrPrimitiveType::Real) => "%lf",
-                                    // TODO UTF-8
-                                    IrVariableType::Primitive(IrPrimitiveType::Character) => " %c",
-                                    _ => unreachable!(),
-                                }),
-                                context.new_cast(
-                                    loc,
-                                    gccjit_temps[temp],
-                                    match ty.as_ref() {
+                            ComparisonOp::GreaterThan,
+                            context.new_call(
+                                loc,
+                                context.get_builtin_function("__builtin_scanf"),
+                                &[
+                                    context.new_string_literal(match ty.as_ref() {
                                         IrVariableType::Primitive(IrPrimitiveType::Natural) => {
-                                            gccjit_natural.make_pointer()
+                                            "%llu"
                                         }
-                                        IrVariableType::Primitive(IrPrimitiveType::Whole) => {
-                                            gccjit_whole.make_pointer()
-                                        }
-                                        IrVariableType::Primitive(IrPrimitiveType::Real) => {
-                                            gccjit_real.make_pointer()
-                                        }
+                                        IrVariableType::Primitive(IrPrimitiveType::Whole) => "%lld",
+                                        IrVariableType::Primitive(IrPrimitiveType::Real) => "%lf",
+                                        // TODO UTF-8
                                         IrVariableType::Primitive(IrPrimitiveType::Character) => {
-                                            gccjit_character.make_pointer()
+                                            " %c"
                                         }
                                         _ => unreachable!(),
-                                    },
-                                ),
-                            ],
+                                    }),
+                                    context.new_cast(
+                                        loc,
+                                        gccjit_temps[val_temp],
+                                        match ty.as_ref() {
+                                            IrVariableType::Primitive(IrPrimitiveType::Natural) => {
+                                                gccjit_natural.make_pointer()
+                                            }
+                                            IrVariableType::Primitive(IrPrimitiveType::Whole) => {
+                                                gccjit_whole.make_pointer()
+                                            }
+                                            IrVariableType::Primitive(IrPrimitiveType::Real) => {
+                                                gccjit_real.make_pointer()
+                                            }
+                                            IrVariableType::Primitive(
+                                                IrPrimitiveType::Character,
+                                            ) => gccjit_character.make_pointer(),
+                                            _ => unreachable!(),
+                                        },
+                                    ),
+                                ],
+                            ),
+                            context.new_rvalue_zero(gccjit_int),
                         ),
                     );
                 }

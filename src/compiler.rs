@@ -1,5 +1,4 @@
 // TODO String newlines
-// TODO Fallible IO
 // TODO Short-circuiting
 // TODO Custom functions, procedures, and structures
 // TODO Generics
@@ -55,8 +54,8 @@ pub enum IrInstructionType {
     Resize(usize),
     Free,
     // Input/Output
-    Write,
-    Read,
+    Write(usize),
+    Read(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -557,14 +556,35 @@ impl IrCompiler {
             IrInstructionType::Free => {
                 panic!("cannot know what to free at {}:{}", line + 1, column + 1)
             }
-            IrInstructionType::Write => {
-                panic!("cannot know what to write at {}:{}", line + 1, column + 1)
-            }
-            IrInstructionType::Read => panic!(
-                "cannot know what to read into at {}:{}",
-                line + 1,
-                column + 1
-            ),
+            IrInstructionType::Write(temp) => match &self.temps[temp] {
+                IrPrimitiveType::Boolean
+                | IrPrimitiveType::Natural
+                | IrPrimitiveType::Whole
+                | IrPrimitiveType::Real
+                | IrPrimitiveType::Character => IrPrimitiveType::Boolean,
+                _ => panic!("cannot write references at {}:{}", line + 1, column + 1),
+            },
+            IrInstructionType::Read(temp) => match &self.temps[temp] {
+                IrPrimitiveType::Reference(ty) => match ty.as_ref() {
+                    IrVariableType::Primitive(
+                        IrPrimitiveType::Boolean
+                        | IrPrimitiveType::Natural
+                        | IrPrimitiveType::Whole
+                        | IrPrimitiveType::Real
+                        | IrPrimitiveType::Character,
+                    ) => IrPrimitiveType::Boolean,
+                    _ => panic!(
+                        "can only read into referneces to primitives at {}:{}",
+                        line + 1,
+                        column + 1
+                    ),
+                },
+                _ => panic!(
+                    "can only read into references at {}:{}",
+                    line + 1,
+                    column + 1
+                ),
+            },
             _ => todo!(),
         };
         let temp = self.new_temporary(temp_ty);
@@ -835,6 +855,111 @@ impl IrCompiler {
                     let a_temp = self.add_dereference(a_temp, line, column);
                     let b_temp = self.add_dereference(b_temp, line, column);
                     self.add_instruction(IrInstructionType::Equals(a_temp, b_temp), line, column)
+                }
+                "жазылды" => {
+                    let temp = self.compile_expression(&args[0]);
+                    let temp = match &self.temps[temp] {
+                        IrPrimitiveType::Reference(ty)
+                            if matches!(ty.as_ref(), IrVariableType::Primitive(_)) =>
+                        {
+                            self.add_instruction(IrInstructionType::Dereference(temp), line, column)
+                        }
+                        _ => temp,
+                    };
+                    if matches!(
+                        &self.temps[temp],
+                        IrPrimitiveType::Reference(ty)
+                            if matches!(
+                                ty.as_ref(),
+                                IrVariableType::Array(ty)
+                                    if *ty.as_ref()
+                                        == IrVariableType::Primitive(IrPrimitiveType::Character)
+                            )
+                    ) {
+                        let index_temp =
+                            self.add_instruction(IrInstructionType::Natural(0), line, column);
+                        let count_temp =
+                            self.add_instruction(IrInstructionType::Count(temp), line, column);
+                        let end_success_temp =
+                            self.add_instruction(IrInstructionType::Boolean(true), line, column);
+                        let count_deref_temp = self.add_dereference(count_temp, line, column);
+                        let cond_block = self.new_block();
+                        let body_block = self.new_block();
+                        let end_block = self.new_block();
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Unconditional(cond_block),
+                            line,
+                            column,
+                        });
+                        self.block = cond_block;
+                        let cond_temp = self.add_instruction(
+                            IrInstructionType::LessThan(index_temp, count_deref_temp),
+                            line,
+                            column,
+                        );
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Conditional(cond_temp, body_block, end_block),
+                            line,
+                            column,
+                        });
+                        self.block = body_block;
+                        let char_temp = self.add_instruction(
+                            IrInstructionType::Index(temp, index_temp),
+                            line,
+                            column,
+                        );
+                        let char_deref_temp = self.add_dereference(char_temp, line, column);
+                        let success_temp = self.add_instruction(
+                            IrInstructionType::Write(char_deref_temp),
+                            line,
+                            column,
+                        );
+                        let success_block = self.new_block();
+                        let error_block = self.new_block();
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Conditional(
+                                success_temp,
+                                success_block,
+                                error_block,
+                            ),
+                            line,
+                            column,
+                        });
+                        self.block = success_block;
+                        let one_temp =
+                            self.add_instruction(IrInstructionType::Natural(1), line, column);
+                        self.current_block().add_instruction(IrInstruction {
+                            temp: index_temp,
+                            ty: IrInstructionType::Add(index_temp, one_temp),
+                            line,
+                            column,
+                        });
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Unconditional(cond_block),
+                            line,
+                            column,
+                        });
+                        self.block = error_block;
+                        self.current_block().add_instruction(IrInstruction {
+                            temp: end_success_temp,
+                            ty: IrInstructionType::Boolean(false),
+                            line,
+                            column,
+                        });
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Unconditional(end_block),
+                            line,
+                            column,
+                        });
+                        self.block = end_block;
+                        end_success_temp
+                    } else {
+                        self.add_instruction(IrInstructionType::Write(temp), line, column)
+                    }
+                }
+                "оқылды" => {
+                    let temp = self.compile_expression(&args[0]);
+                    self.add_instruction(IrInstructionType::Read(temp), line, column)
                 }
                 _ => todo!(),
             },
@@ -1314,12 +1439,23 @@ impl IrCompiler {
                             column,
                         );
                         let char_deref_temp = self.add_dereference(char_temp, line, column);
-                        self.current_block().add_instruction(IrInstruction {
-                            temp: char_deref_temp,
-                            ty: IrInstructionType::Write,
+                        let success_temp = self.add_instruction(
+                            IrInstructionType::Write(char_deref_temp),
+                            line,
+                            column,
+                        );
+                        let success_block = self.new_block();
+                        let error_block = self.new_block();
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Conditional(
+                                success_temp,
+                                success_block,
+                                error_block,
+                            ),
                             line,
                             column,
                         });
+                        self.block = success_block;
                         let one_temp =
                             self.add_instruction(IrInstructionType::Natural(1), line, column);
                         self.current_block().add_instruction(IrInstruction {
@@ -1333,24 +1469,66 @@ impl IrCompiler {
                             line,
                             column,
                         });
-                        self.block = end_block;
-                    } else {
-                        self.current_block().add_instruction(IrInstruction {
-                            temp,
-                            ty: IrInstructionType::Write,
+                        self.block = error_block;
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Error(format!(
+                                "write error at {}:{}",
+                                line + 1,
+                                column + 1
+                            )),
                             line,
                             column,
                         });
+                        self.block = end_block;
+                    } else {
+                        let success_temp =
+                            self.add_instruction(IrInstructionType::Write(temp), line, column);
+                        let success_block = self.new_block();
+                        let error_block = self.new_block();
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Conditional(
+                                success_temp,
+                                success_block,
+                                error_block,
+                            ),
+                            line,
+                            column,
+                        });
+                        self.block = error_block;
+                        self.current_block().terminate(IrTerminator {
+                            ty: IrTerminatorType::Error(format!(
+                                "write error at {}:{}",
+                                line + 1,
+                                column + 1
+                            )),
+                            line,
+                            column,
+                        });
+                        self.block = success_block;
                     }
                 }
                 (1, "оқы") => {
                     let temp = self.compile_expression(&args[0]);
-                    self.current_block().add_instruction(IrInstruction {
-                        temp,
-                        ty: IrInstructionType::Read,
+                    let success_temp =
+                        self.add_instruction(IrInstructionType::Read(temp), line, column);
+                    let success_block = self.new_block();
+                    let error_block = self.new_block();
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Conditional(success_temp, success_block, error_block),
                         line,
                         column,
                     });
+                    self.block = error_block;
+                    self.current_block().terminate(IrTerminator {
+                        ty: IrTerminatorType::Error(format!(
+                            "error reading at {}:{}",
+                            line + 1,
+                            column + 1
+                        )),
+                        line,
+                        column,
+                    });
+                    self.block = success_block;
                 }
                 (2, "қос") => {
                     let arr_temp = self.compile_expression(&args[0]);

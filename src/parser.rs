@@ -115,6 +115,8 @@ impl Parser {
         names.insert("символ".to_string(), AstNameType::Function(1));
         names.insert("емес".to_string(), AstNameType::Function(1));
         names.insert("саны".to_string(), AstNameType::Function(1));
+        names.insert("жазылды".to_string(), AstNameType::Function(1));
+        names.insert("оқылды".to_string(), AstNameType::Function(1));
         names.insert("артық".to_string(), AstNameType::Function(2));
         names.insert("кем".to_string(), AstNameType::Function(2));
         names.insert("қалдық".to_string(), AstNameType::Function(2));
