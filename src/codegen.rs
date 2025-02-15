@@ -1,6 +1,5 @@
-// TODO Switch to using only types hashmap instead of gccjit_* types
 // TODO String newlines
-// TODO UTF-8 printing
+// TODO UTF-8 input
 // TODO Stirng input
 // TODO Resize failures
 
@@ -96,40 +95,41 @@ fn get_size(ty: &IrVariableType) -> usize {
 
 pub fn compile(function: IrFunction) {
     let context = Context::default();
+
     let gccjit_int = context.new_c_type(CType::Int);
+    let gccjit_void_ptr = context.new_type::<()>().make_pointer();
+    let gccjit_size_t = context.new_c_type(CType::SizeT);
+
     let gccjit_function =
         context.new_function(None, FunctionType::Exported, gccjit_int, &[], "main", false);
+
     let mut types = HashMap::new();
     put_gccjit_type(
         &context,
         &mut types,
         &IrVariableType::Primitive(IrPrimitiveType::Boolean),
     );
-    let gccjit_boolean = types[&IrVariableType::Primitive(IrPrimitiveType::Boolean)].ty;
     put_gccjit_type(
         &context,
         &mut types,
         &IrVariableType::Primitive(IrPrimitiveType::Natural),
     );
-    let gccjit_natural = types[&IrVariableType::Primitive(IrPrimitiveType::Natural)].ty;
     put_gccjit_type(
         &context,
         &mut types,
         &IrVariableType::Primitive(IrPrimitiveType::Whole),
     );
-    let gccjit_whole = types[&IrVariableType::Primitive(IrPrimitiveType::Whole)].ty;
     put_gccjit_type(
         &context,
         &mut types,
         &IrVariableType::Primitive(IrPrimitiveType::Real),
     );
-    let gccjit_real = types[&IrVariableType::Primitive(IrPrimitiveType::Real)].ty;
     put_gccjit_type(
         &context,
         &mut types,
         &IrVariableType::Primitive(IrPrimitiveType::Character),
     );
-    let gccjit_character = types[&IrVariableType::Primitive(IrPrimitiveType::Character)].ty;
+
     let gccjit_vars: Vec<_> = function
         .vars
         .iter()
@@ -139,6 +139,7 @@ pub fn compile(function: IrFunction) {
             gccjit_function.new_local(None, types[ty].ty, format!("var_{index}"))
         })
         .collect();
+
     let (gccjit_temps, temp_var_types): (Vec<_>, Vec<_>) = function
         .temps
         .iter()
@@ -152,6 +153,7 @@ pub fn compile(function: IrFunction) {
             )
         })
         .unzip();
+
     let gccjit_blocks: Vec<_> = (0..function.blocks.len())
         .map(|index| {
             if function.blocks[index].is_some() {
@@ -161,8 +163,299 @@ pub fn compile(function: IrFunction) {
             }
         })
         .collect();
-    let gccjit_void_ptr = context.new_type::<()>().make_pointer();
-    let gccjit_size_t = context.new_c_type(CType::SizeT);
+
+    let gccjit_utf8_putchar = {
+        let character = types[&IrVariableType::Primitive(IrPrimitiveType::Character)].ty;
+        let boolean = context.new_type::<bool>();
+
+        let function = context.new_function(
+            None,
+            FunctionType::AlwaysInline,
+            gccjit_int,
+            &[context.new_parameter(None, character, "c")],
+            "utf8_putchar",
+            false,
+        );
+        let param = function.get_param(0).to_rvalue();
+        let putchar = context.get_builtin_function("__builtin_putchar");
+
+        let zero = context.new_rvalue_zero(gccjit_int);
+        let six = context.new_rvalue_from_long(character, 6);
+        let twelve = context.new_rvalue_from_long(character, 12);
+        let eighteen = context.new_rvalue_from_long(character, 18);
+        let hex_3f = context.new_rvalue_from_long(character, 0x3F);
+        let hex_80 = context.new_rvalue_from_long(character, 0x80);
+
+        let last_one = context.new_comparison(
+            None,
+            ComparisonOp::GreaterThanEquals,
+            context.new_call(
+                None,
+                putchar,
+                &[context.new_cast(
+                    None,
+                    context.new_binary_op(
+                        None,
+                        BinaryOp::BitwiseOr,
+                        character,
+                        context.new_binary_op(None, BinaryOp::BitwiseAnd, character, param, hex_3f),
+                        hex_80,
+                    ),
+                    gccjit_int,
+                )],
+            ),
+            zero,
+        );
+        let last_two = context.new_binary_op(
+            None,
+            BinaryOp::LogicalAnd,
+            boolean,
+            last_one,
+            context.new_comparison(
+                None,
+                ComparisonOp::GreaterThanEquals,
+                context.new_call(
+                    None,
+                    putchar,
+                    &[context.new_cast(
+                        None,
+                        context.new_binary_op(
+                            None,
+                            BinaryOp::BitwiseOr,
+                            character,
+                            context.new_binary_op(
+                                None,
+                                BinaryOp::BitwiseAnd,
+                                character,
+                                context.new_binary_op(
+                                    None,
+                                    BinaryOp::RShift,
+                                    character,
+                                    param,
+                                    six,
+                                ),
+                                hex_3f,
+                            ),
+                            hex_80,
+                        ),
+                        gccjit_int,
+                    )],
+                ),
+                zero,
+            ),
+        );
+        let last_three = context.new_binary_op(
+            None,
+            BinaryOp::LogicalAnd,
+            boolean,
+            last_two,
+            context.new_comparison(
+                None,
+                ComparisonOp::GreaterThanEquals,
+                context.new_call(
+                    None,
+                    putchar,
+                    &[context.new_cast(
+                        None,
+                        context.new_binary_op(
+                            None,
+                            BinaryOp::BitwiseOr,
+                            character,
+                            context.new_binary_op(
+                                None,
+                                BinaryOp::BitwiseAnd,
+                                character,
+                                context.new_binary_op(
+                                    None,
+                                    BinaryOp::RShift,
+                                    character,
+                                    param,
+                                    twelve,
+                                ),
+                                hex_3f,
+                            ),
+                            hex_80,
+                        ),
+                        gccjit_int,
+                    )],
+                ),
+                zero,
+            ),
+        );
+
+        let entry = function.new_block("entry");
+        let one = function.new_block("one");
+        let not_one = function.new_block("not one");
+        let two = function.new_block("two");
+        let not_two = function.new_block("not two");
+        let three = function.new_block("three");
+        let four = function.new_block("four");
+        entry.end_with_conditional(
+            None,
+            context.new_comparison(
+                None,
+                ComparisonOp::LessThan,
+                param,
+                context.new_rvalue_from_long(character, 0x80),
+            ),
+            one,
+            not_one,
+        );
+        one.end_with_return(
+            None,
+            context.new_cast(
+                None,
+                context.new_comparison(
+                    None,
+                    ComparisonOp::GreaterThanEquals,
+                    context.new_call(None, putchar, &[context.new_cast(None, param, gccjit_int)]),
+                    zero,
+                ),
+                gccjit_int,
+            ),
+        );
+        not_one.end_with_conditional(
+            None,
+            context.new_comparison(
+                None,
+                ComparisonOp::LessThan,
+                param,
+                context.new_rvalue_from_long(character, 0x800),
+            ),
+            two,
+            not_two,
+        );
+        two.end_with_return(
+            None,
+            context.new_cast(
+                None,
+                context.new_binary_op(
+                    None,
+                    BinaryOp::LogicalAnd,
+                    boolean,
+                    context.new_comparison(
+                        None,
+                        ComparisonOp::GreaterThanEquals,
+                        context.new_call(
+                            None,
+                            putchar,
+                            &[context.new_cast(
+                                None,
+                                context.new_binary_op(
+                                    None,
+                                    BinaryOp::BitwiseOr,
+                                    character,
+                                    context.new_binary_op(
+                                        None,
+                                        BinaryOp::RShift,
+                                        character,
+                                        param,
+                                        six,
+                                    ),
+                                    context.new_rvalue_from_long(character, 0xC0),
+                                ),
+                                gccjit_int,
+                            )],
+                        ),
+                        zero,
+                    ),
+                    last_one,
+                ),
+                gccjit_int,
+            ),
+        );
+        not_two.end_with_conditional(
+            None,
+            context.new_comparison(
+                None,
+                ComparisonOp::LessThan,
+                param,
+                context.new_rvalue_from_long(character, 0x1000),
+            ),
+            three,
+            four,
+        );
+        three.end_with_return(
+            None,
+            context.new_cast(
+                None,
+                context.new_binary_op(
+                    None,
+                    BinaryOp::LogicalAnd,
+                    boolean,
+                    context.new_comparison(
+                        None,
+                        ComparisonOp::GreaterThanEquals,
+                        context.new_call(
+                            None,
+                            putchar,
+                            &[context.new_cast(
+                                None,
+                                context.new_binary_op(
+                                    None,
+                                    BinaryOp::BitwiseOr,
+                                    character,
+                                    context.new_binary_op(
+                                        None,
+                                        BinaryOp::RShift,
+                                        character,
+                                        param,
+                                        twelve,
+                                    ),
+                                    context.new_rvalue_from_long(character, 0xE0),
+                                ),
+                                gccjit_int,
+                            )],
+                        ),
+                        zero,
+                    ),
+                    last_two,
+                ),
+                gccjit_int,
+            ),
+        );
+        four.end_with_return(
+            None,
+            context.new_cast(
+                None,
+                context.new_binary_op(
+                    None,
+                    BinaryOp::LogicalAnd,
+                    boolean,
+                    context.new_comparison(
+                        None,
+                        ComparisonOp::GreaterThanEquals,
+                        context.new_call(
+                            None,
+                            putchar,
+                            &[context.new_cast(
+                                None,
+                                context.new_binary_op(
+                                    None,
+                                    BinaryOp::BitwiseOr,
+                                    character,
+                                    context.new_binary_op(
+                                        None,
+                                        BinaryOp::RShift,
+                                        character,
+                                        param,
+                                        eighteen,
+                                    ),
+                                    context.new_rvalue_from_long(character, 0xF0),
+                                ),
+                                gccjit_int,
+                            )],
+                        ),
+                        zero,
+                    ),
+                    last_three,
+                ),
+                gccjit_int,
+            ),
+        );
+        function
+    };
+
     for (block_index, block) in function.blocks.into_iter().enumerate() {
         let Some(IrTerminatedBlock {
             insts,
@@ -187,9 +480,9 @@ pub fn compile(function: IrFunction) {
                         loc,
                         gccjit_temps[temp],
                         if value {
-                            context.new_rvalue_one(gccjit_boolean)
+                            context.new_rvalue_one(types[&temp_var_types[temp]].ty)
                         } else {
-                            context.new_rvalue_zero(gccjit_boolean)
+                            context.new_rvalue_zero(types[&temp_var_types[temp]].ty)
                         },
                     );
                 }
@@ -200,15 +493,21 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::Plus,
-                            gccjit_natural,
+                            types[&temp_var_types[temp]].ty,
                             context.new_binary_op(
                                 loc,
                                 BinaryOp::LShift,
-                                gccjit_natural,
-                                context.new_rvalue_from_long(gccjit_natural, (value >> 32) as _),
-                                context.new_rvalue_from_int(gccjit_natural, 32),
+                                types[&temp_var_types[temp]].ty,
+                                context.new_rvalue_from_long(
+                                    types[&temp_var_types[temp]].ty,
+                                    (value >> 32) as _,
+                                ),
+                                context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 32),
                             ),
-                            context.new_rvalue_from_long(gccjit_natural, (value & 0xFFFFFFFF) as _),
+                            context.new_rvalue_from_long(
+                                types[&temp_var_types[temp]].ty,
+                                (value & 0xFFFFFFFF) as _,
+                            ),
                         ),
                     );
                 }
@@ -219,15 +518,21 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::Plus,
-                            gccjit_whole,
+                            types[&temp_var_types[temp]].ty,
                             context.new_binary_op(
                                 loc,
                                 BinaryOp::LShift,
-                                gccjit_whole,
-                                context.new_rvalue_from_long(gccjit_whole, (value >> 32) as _),
-                                context.new_rvalue_from_int(gccjit_whole, 32),
+                                types[&temp_var_types[temp]].ty,
+                                context.new_rvalue_from_long(
+                                    types[&temp_var_types[temp]].ty,
+                                    (value >> 32) as _,
+                                ),
+                                context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 32),
                             ),
-                            context.new_rvalue_from_long(gccjit_whole, (value & 0xFFFFFFFF) as _),
+                            context.new_rvalue_from_long(
+                                types[&temp_var_types[temp]].ty,
+                                (value & 0xFFFFFFFF) as _,
+                            ),
                         ),
                     );
                 }
@@ -235,14 +540,14 @@ pub fn compile(function: IrFunction) {
                     gccjit_block.add_assignment(
                         loc,
                         gccjit_temps[temp],
-                        context.new_rvalue_from_double(gccjit_real, value),
+                        context.new_rvalue_from_double(types[&temp_var_types[temp]].ty, value),
                     );
                 }
                 IrInstructionType::Character(value) => {
                     gccjit_block.add_assignment(
                         loc,
                         gccjit_temps[temp],
-                        context.new_rvalue_from_int(gccjit_character, value as _),
+                        context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, value as _),
                     );
                 }
                 IrInstructionType::Null => {
@@ -265,32 +570,18 @@ pub fn compile(function: IrFunction) {
                         context.new_null(types[ty].ty.make_pointer()),
                     );
                 }
-                IrInstructionType::ToNatural(value_temp) => {
+                IrInstructionType::ToNatural(value_temp)
+                | IrInstructionType::ToWhole(value_temp)
+                | IrInstructionType::ToReal(value_temp)
+                | IrInstructionType::ToCharacter(value_temp) => {
                     gccjit_block.add_assignment(
                         loc,
                         gccjit_temps[temp],
-                        context.new_cast(loc, gccjit_temps[value_temp], gccjit_natural),
-                    );
-                }
-                IrInstructionType::ToWhole(value_temp) => {
-                    gccjit_block.add_assignment(
-                        loc,
-                        gccjit_temps[temp],
-                        context.new_cast(loc, gccjit_temps[value_temp], gccjit_whole),
-                    );
-                }
-                IrInstructionType::ToReal(value_temp) => {
-                    gccjit_block.add_assignment(
-                        loc,
-                        gccjit_temps[temp],
-                        context.new_cast(loc, gccjit_temps[value_temp], gccjit_real),
-                    );
-                }
-                IrInstructionType::ToCharacter(value_temp) => {
-                    gccjit_block.add_assignment(
-                        loc,
-                        gccjit_temps[temp],
-                        context.new_cast(loc, gccjit_temps[value_temp], gccjit_character),
+                        context.new_cast(
+                            loc,
+                            gccjit_temps[value_temp],
+                            types[&temp_var_types[temp]].ty,
+                        ),
                     );
                 }
                 IrInstructionType::And(a_temp, b_temp) => {
@@ -300,7 +591,7 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::LogicalAnd,
-                            gccjit_boolean,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[a_temp],
                             gccjit_temps[b_temp],
                         ),
@@ -313,7 +604,7 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::LogicalOr,
-                            gccjit_boolean,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[a_temp],
                             gccjit_temps[b_temp],
                         ),
@@ -326,7 +617,7 @@ pub fn compile(function: IrFunction) {
                         context.new_unary_op(
                             loc,
                             UnaryOp::LogicalNegate,
-                            gccjit_boolean,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[value_temp],
                         ),
                     );
@@ -338,12 +629,7 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::Plus,
-                            match &function.temps[temp] {
-                                IrPrimitiveType::Natural => gccjit_natural,
-                                IrPrimitiveType::Whole => gccjit_whole,
-                                IrPrimitiveType::Real => gccjit_real,
-                                _ => unreachable!(),
-                            },
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[a_temp],
                             gccjit_temps[b_temp],
                         ),
@@ -356,11 +642,7 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::Minus,
-                            match &function.temps[temp] {
-                                IrPrimitiveType::Whole => gccjit_whole,
-                                IrPrimitiveType::Real => gccjit_real,
-                                _ => unreachable!(),
-                            },
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[a_temp],
                             gccjit_temps[b_temp],
                         ),
@@ -373,12 +655,7 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::Mult,
-                            match &function.temps[temp] {
-                                IrPrimitiveType::Natural => gccjit_natural,
-                                IrPrimitiveType::Whole => gccjit_whole,
-                                IrPrimitiveType::Real => gccjit_real,
-                                _ => unreachable!(),
-                            },
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[a_temp],
                             gccjit_temps[b_temp],
                         ),
@@ -391,7 +668,7 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::Divide,
-                            gccjit_real,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[a_temp],
                             gccjit_temps[b_temp],
                         ),
@@ -420,11 +697,7 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::Modulo,
-                            match function.temps[temp] {
-                                IrPrimitiveType::Natural => gccjit_natural,
-                                IrPrimitiveType::Whole => gccjit_whole,
-                                _ => unreachable!(),
-                            },
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[a_temp],
                             gccjit_temps[b_temp],
                         ),
@@ -437,11 +710,7 @@ pub fn compile(function: IrFunction) {
                         context.new_unary_op(
                             loc,
                             UnaryOp::Minus,
-                            match &function.temps[temp] {
-                                IrPrimitiveType::Whole => gccjit_whole,
-                                IrPrimitiveType::Real => gccjit_real,
-                                _ => unreachable!(),
-                            },
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[value_temp],
                         ),
                     );
@@ -455,9 +724,9 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::RShift,
-                            gccjit_natural,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[temp],
-                            context.new_rvalue_from_int(gccjit_natural, 1),
+                            context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 1),
                         ),
                     );
                     gccjit_block.add_assignment_op(
@@ -467,9 +736,9 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::RShift,
-                            gccjit_natural,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[temp],
-                            context.new_rvalue_from_int(gccjit_natural, 2),
+                            context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 2),
                         ),
                     );
                     gccjit_block.add_assignment_op(
@@ -479,9 +748,9 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::RShift,
-                            gccjit_natural,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[temp],
-                            context.new_rvalue_from_int(gccjit_natural, 4),
+                            context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 4),
                         ),
                     );
                     gccjit_block.add_assignment_op(
@@ -491,9 +760,9 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::RShift,
-                            gccjit_natural,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[temp],
-                            context.new_rvalue_from_int(gccjit_natural, 8),
+                            context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 8),
                         ),
                     );
                     gccjit_block.add_assignment_op(
@@ -503,9 +772,9 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::RShift,
-                            gccjit_natural,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[temp],
-                            context.new_rvalue_from_int(gccjit_natural, 16),
+                            context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 16),
                         ),
                     );
                     gccjit_block.add_assignment_op(
@@ -515,9 +784,9 @@ pub fn compile(function: IrFunction) {
                         context.new_binary_op(
                             loc,
                             BinaryOp::RShift,
-                            gccjit_natural,
+                            types[&temp_var_types[temp]].ty,
                             gccjit_temps[temp],
-                            context.new_rvalue_from_int(gccjit_natural, 32),
+                            context.new_rvalue_from_int(types[&temp_var_types[temp]].ty, 32),
                         ),
                     );
                 }
@@ -640,14 +909,7 @@ pub fn compile(function: IrFunction) {
                     );
                 }
                 IrInstructionType::Dereference(value_temp) => {
-                    let gccjit_type = match function.temps[temp] {
-                        IrPrimitiveType::Boolean => gccjit_boolean,
-                        IrPrimitiveType::Natural => gccjit_natural,
-                        IrPrimitiveType::Whole => gccjit_whole,
-                        IrPrimitiveType::Real => gccjit_real,
-                        IrPrimitiveType::Character => gccjit_character,
-                        IrPrimitiveType::Reference(_) => types[&temp_var_types[temp]].ty,
-                    };
+                    let gccjit_type = types[&temp_var_types[temp]].ty;
                     gccjit_block.add_assignment(
                         loc,
                         gccjit_temps[temp],
@@ -693,10 +955,10 @@ pub fn compile(function: IrFunction) {
                                         context.new_binary_op(
                                             loc,
                                             BinaryOp::Mult,
-                                            gccjit_natural,
+                                            types[&temp_var_types[size_temp]].ty,
                                             gccjit_temps[size_temp],
                                             context.new_rvalue_from_int(
-                                                gccjit_natural,
+                                                types[&temp_var_types[size_temp]].ty,
                                                 get_size(ty) as _,
                                             ),
                                         ),
@@ -786,21 +1048,29 @@ pub fn compile(function: IrFunction) {
                         context.new_comparison(
                             loc,
                             ComparisonOp::GreaterThanEquals,
-                            context.new_call(
-                                loc,
-                                context.get_builtin_function("__builtin_printf"),
-                                &[
-                                    context.new_string_literal(match function.temps[val_temp] {
-                                        IrPrimitiveType::Natural => "%llu\n",
-                                        IrPrimitiveType::Whole => "%lld\n",
-                                        IrPrimitiveType::Real => "%f\n",
-                                        // TODO UTF-8
-                                        IrPrimitiveType::Character => "%c",
-                                        _ => unreachable!(),
-                                    }),
-                                    gccjit_temps[val_temp].to_rvalue(),
-                                ],
-                            ),
+                            if let IrPrimitiveType::Character = function.temps[val_temp] {
+                                context.new_call(
+                                    loc,
+                                    gccjit_utf8_putchar,
+                                    &[gccjit_temps[val_temp].to_rvalue()],
+                                )
+                            } else {
+                                context.new_call(
+                                    loc,
+                                    context.get_builtin_function("__builtin_printf"),
+                                    &[
+                                        context.new_string_literal(
+                                            match function.temps[val_temp] {
+                                                IrPrimitiveType::Natural => "%llu\n",
+                                                IrPrimitiveType::Whole => "%lld\n",
+                                                IrPrimitiveType::Real => "%f\n",
+                                                _ => unreachable!(),
+                                            },
+                                        ),
+                                        gccjit_temps[val_temp].to_rvalue(),
+                                    ],
+                                )
+                            },
                             context.new_rvalue_zero(gccjit_int),
                         ),
                     );
@@ -834,21 +1104,7 @@ pub fn compile(function: IrFunction) {
                                     context.new_cast(
                                         loc,
                                         gccjit_temps[val_temp],
-                                        match ty.as_ref() {
-                                            IrVariableType::Primitive(IrPrimitiveType::Natural) => {
-                                                gccjit_natural.make_pointer()
-                                            }
-                                            IrVariableType::Primitive(IrPrimitiveType::Whole) => {
-                                                gccjit_whole.make_pointer()
-                                            }
-                                            IrVariableType::Primitive(IrPrimitiveType::Real) => {
-                                                gccjit_real.make_pointer()
-                                            }
-                                            IrVariableType::Primitive(
-                                                IrPrimitiveType::Character,
-                                            ) => gccjit_character.make_pointer(),
-                                            _ => unreachable!(),
-                                        },
+                                        types[ty].ty.make_pointer(),
                                     ),
                                 ],
                             ),
